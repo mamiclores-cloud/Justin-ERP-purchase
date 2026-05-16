@@ -1,0 +1,37 @@
+# ===== Node.js =====
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+
+# ===== 敏感資料 =====
+# 含商店代碼/帳號/密碼
+secrets.js
+# 共用 sister project 的 chrome-profile，本地保險也加上
+chrome-profile/
+chrome-profile.bak-*/
+
+# ===== 自動化產出 =====
+recordings/
+state/
+schedules.json
+
+# ===== 偵察用資料（含 ERP 內部資訊）=====
+analysis/
+landing.html
+site-info.json
+*-debug.png
+*-preview.html
+
+# ===== 臨時 / Debug =====
+__debug*.js
+__test*.*
+__tmp-*.js
+*.log
+
+# ===== 編輯器 / OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

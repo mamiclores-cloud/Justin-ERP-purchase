@@ -1,0 +1,16 @@
+{
+  "name": "justin-erp-purchase-print",
+  "version": "0.1.0",
+  "description": "阿靳 ERP 智能採購自動建單（HTTP-direct，含 web 控制台）",
+  "main": "server.js",
+  "scripts": {
+    "start":   "node server.js",
+    "console": "node server.js",
+    "cli":     "node purchase-create.js",
+    "test":    "echo \"no tests yet\" && exit 0"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>智能採購 / 自動化控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header__row">
+      <h1 class="app-title">
+        智能採購 / 自動化控制台
+        <span class="app-title__badge" id="modeBadge">DRY-RUN</span>
+      </h1>
+      <div class="app-meta">
+        <button id="sessionStatus" class="session-pill" title="點擊手動 refresh session">
+          <span class="session-pill__dot"></span>
+          <span class="session-pill__text">session: --</span>
+        </button>
+        <span class="app-meta__sep">·</span>
+        <span id="serverInfo">srv01.ajinerp.com</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs--top" role="tablist">
+    <button class="tab tab--purchase is-active" data-tab="purchase" role="tab" aria-selected="true">
+      <span class="tab__prefix">01</span> 智能採購建單
+    </button>
+    <button class="tab" data-tab="anomalies" role="tab" aria-selected="false">
+      <span class="tab__prefix">02</span> 異常紀錄
+      <span class="tab__badge" id="anomalyTabBadge" style="display:none;">0</span>
+    </button>
+    <button class="tab" data-tab="schedule" role="tab" aria-selected="false">
+      <span class="tab__prefix">03</span> 排程
+    </button>
+  </nav>
+
+  <main>
+    <!-- ============================================================== -->
+    <!-- 01 智能採購建單 -->
+    <!-- ============================================================== -->
+    <section id="tab-purchase" class="tab-panel system-panel system-panel--purchase is-active" role="tabpanel">
+      <div class="system-banner system-banner--purchase">
+        <div class="system-banner__col-label">
+          <div class="eyebrow">System / 01</div>
+        </div>
+        <div class="system-banner__col-content">
+          <h2 class="system-banner__title">智能採購建單</h2>
+        </div>
+      </div>
+
+      <nav class="tabs--sub">
+        <button class="tab is-active" data-subtab="purchase-steps">分步執行（單一貨號）</button>
+        <button class="tab" data-subtab="purchase-oneclick">一鍵完成（全部）</button>
+      </nav>
+
+      <!-- ========== 分步執行 sub-panel ========== -->
+      <section id="subtab-purchase-steps" class="sub-panel is-active">
+        <div class="single-bar">
+          <div class="single-bar__label">單一貨號模式</div>
+          <div class="single-bar__grid">
+            <div class="field">
+              <label class="field__label">主貨號 (MainId)</label>
+              <input type="text" id="stepMainId" placeholder="例：KBT580" />
+            </div>
+            <div class="field">
+              <label class="field__label">需求算式</label>
+              <select id="stepCardinality">
+                <option value="SafetyStock">安全庫存</option>
+                <option value="SalesCount7">7 日銷量</option>
+                <option value="SalesCount15">15 日銷量</option>
+                <option value="SalesCount30" selected>30 日銷量</option>
+                <option value="SalesCount60">60 日銷量</option>
+                <option value="SalesCount90">90 日銷量</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label">倍率 (%)</label>
+              <input type="number" id="stepPercent" value="150" min="1" max="999" />
+            </div>
+            <div class="field">
+              <label class="field__label">採購平台前綴</label>
+              <input type="text" id="stepPlatformPrefix" value="indo-" />
+            </div>
+            <div class="field">
+              <label class="field__label">寄送目的地</label>
+              <input type="text" id="stepPlatformDest" value="Office" list="stepDestList" />
+              <datalist id="stepDestList">
+                <option value="Office"></option>
+                <option value="BIAN"></option>
+              </datalist>
+            </div>
+            <div class="field">
+              <label class="field__label">最終 PurchasePlatform</label>
+              <input type="text" id="stepPlatformPreview" readonly />
+            </div>
+          </div>
+        </div>
+
+        <h3 class="section-title">流程步驟</h3>
+        <div class="step-grid">
+          <!-- Step 1：預覽 -->
+          <div class="step" data-step-id="preview">
+            <div class="step__header">
+              <span class="step__num">01</span>
+              <h3 class="step__title">查商品 + 規則決策（預覽）</h3>
+              <span class="status status--idle" data-role="status">
+                <span class="status__dot"></span>
+                <span data-role="status-label">待執行</span>
+              </span>
+            </div>
+            <p class="step__desc">
+              對該貨號跑 ProductSpecList → 套規則（NX 倍數 / STOP 跳過）→ 顯示每規格採購量、加總、是否達標。純讀，不寫入 ERP。
+            </p>
+            <div class="step__safety is-safe">
+              <span class="step__safety-icon">SAFE</span>
+              <span>GET /api/ProductOverview/ProductSpecList — 純讀，零副作用</span>
+            </div>
+            <div class="step__actions">
+              <button class="btn btn--primary" data-step-action="preview">預覽 (Dry-Run)</button>
+              <button class="btn btn--danger" data-step-action="stop" style="display:none;">停止</button>
+            </div>
+            <div class="log-panel" data-role="log"></div>
+          </div>
+
+          <!-- Step 2：建單 -->
+          <div class="step" data-step-id="create">
+            <div class="step__header">
+              <span class="step__num">02</span>
+              <h3 class="step__title">建立採購單（真執行）</h3>
+              <span class="status status--idle" data-role="status">
+                <span class="status__dot"></span>
+                <span data-role="status-label">待執行</span>
+              </span>
+            </div>
+            <p class="step__desc">
+              對該貨號 POST /api/PurchaseSheet/add 在 ERP 建立採購單。建議先按 Step 01 預覽，確認規則決策無誤再建單。
+            </p>
+            <div class="step__safety">
+              <span class="step__safety-icon">WARN</span>
+              <span>POST /api/PurchaseSheet/add — 會在 ERP 建立採購單</span>
+            </div>
+            <div class="step__actions">
+              <button class="btn btn--primary btn--lg" data-step-action="execute">建單 (EXECUTE)</button>
+              <button class="btn btn--danger" data-step-action="stop" style="display:none;">停止</button>
+            </div>
+            <div class="log-panel" data-role="log"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 一鍵完成 sub-panel ========== -->
+      <section id="subtab-purchase-oneclick" class="sub-panel">
+        <section class="form-card">
+          <h3 class="section-title">搜尋條件</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field__label">關鍵字類型</label>
+              <select id="keywordType">
+                <option value="Keyword">標籤 (Keyword)</option>
+                <option value="ProductName">商品名稱</option>
+                <option value="ProductCode">主貨號</option>
+                <option value="ALL">廣泛搜尋（依序試三個）</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label">關鍵字</label>
+              <input type="text" id="keyword" placeholder="例：Indo" />
+            </div>
+            <div class="field">
+              <label class="field__label">需求算式</label>
+              <select id="cardinality">
+                <option value="SafetyStock">安全庫存</option>
+                <option value="SalesCount7">7 日銷量</option>
+                <option value="SalesCount15">15 日銷量</option>
+                <option value="SalesCount30" selected>30 日銷量</option>
+                <option value="SalesCount60">60 日銷量</option>
+                <option value="SalesCount90">90 日銷量</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label">倍率 (%)</label>
+              <input type="number" id="percent" value="150" min="1" max="999" />
+            </div>
+          </div>
+
+          <h3 class="section-title" style="margin-top:18px;">採購單參數</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field__label">採購平台前綴</label>
+              <input type="text" id="platformPrefix" value="indo-" />
+            </div>
+            <div class="field">
+              <label class="field__label">寄送目的地</label>
+              <input type="text" id="platformDest" placeholder="Office / BIAN / 自訂..." value="Office" list="destList" />
+              <datalist id="destList">
+                <option value="Office"></option>
+                <option value="BIAN"></option>
+              </datalist>
+            </div>
+            <div class="field">
+              <label class="field__label">最終 PurchasePlatform</label>
+              <input type="text" id="platformPreview" readonly />
+            </div>
+          </div>
+        </section>
+
+        <section class="action-card">
+          <div class="action-card__row">
+            <div class="action-card__warning" id="executeWarning" style="display:none;">
+              <strong>WARNING —</strong> EXECUTE 模式會實際在 ERP 建立採購單，請先 DRY-RUN 確認決策正確。
+            </div>
+            <div class="action-card__buttons">
+              <span class="status status--idle" id="runStatus"><span class="status__dot"></span>idle</span>
+              <button class="btn btn--ghost" id="btnDryRun">預覽 (Dry-Run)</button>
+              <button class="btn btn--primary btn--lg" id="btnExecute">真執行 (EXECUTE)</button>
+              <button class="btn btn--danger" id="btnStop" style="display:none;">停止</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="log-card">
+          <div class="log-card__head">
+            <h3 class="section-title" style="margin:0;">執行 log</h3>
+            <div class="log-card__meta">
+              <span id="logSummary"></span>
+              <button class="btn btn--ghost" id="btnClearLog">清空</button>
+            </div>
+          </div>
+          <div class="log-panel" id="logPanel"></div>
+        </section>
+      </section>
+    </section>
+
+    <!-- ============================================================== -->
+    <!-- 02 異常紀錄 -->
+    <!-- ============================================================== -->
+    <section id="tab-anomalies" class="tab-panel" role="tabpanel">
+      <div class="anomaly-head">
+        <div>
+          <h2>異常紀錄</h2>
+          <p class="oneclick__subtitle" style="margin-top:4px;">每次執行後自動記錄不能建單 / 需 review 的商品；即時更新</p>
+        </div>
+        <div class="anomaly-head__actions">
+          <button class="btn btn--ghost" id="btnAnomalyRefresh">↻ 重新整理</button>
+          <button class="btn btn--primary" id="btnAnomalyDownload">↓ 下載 CSV</button>
+          <button class="btn btn--danger" id="btnAnomalyClear">清空全部</button>
+        </div>
+      </div>
+
+      <div class="anomaly-toolbar">
+        <div class="anomaly-filter">
+          <label class="field__label">類型</label>
+          <select id="anomalyTypeFilter">
+            <option value="">全部</option>
+            <option value="insufficient-quantity">數量不足</option>
+            <option value="stop-spec-skipped">STOP 故沒訂購</option>
+          </select>
+        </div>
+        <div class="anomaly-filter">
+          <label class="field__label">模式</label>
+          <select id="anomalyModeFilter">
+            <option value="">全部</option>
+            <option value="execute">EXECUTE</option>
+            <option value="dry-run">DRY-RUN</option>
+          </select>
+        </div>
+        <div class="anomaly-filter anomaly-filter--grow">
+          <label class="field__label">搜尋貨號 / 訊息</label>
+          <input type="text" id="anomalySearch" placeholder="例：KBT580 或 STOP" />
+        </div>
+        <div class="anomaly-filter anomaly-filter--count">
+          <span class="anomaly-count" id="anomalyCount">0 筆</span>
+          <small style="display:block; color:var(--ink-50); font-size:10px; margin-top:4px; font-family:var(--font-mono); letter-spacing:0.02em;">
+            dry-run / execute 皆記錄
+          </small>
+        </div>
+      </div>
+
+      <div id="anomalyList" class="anomaly-list"></div>
+    </section>
+
+    <!-- ============================================================== -->
+    <!-- 03 排程 -->
+    <!-- ============================================================== -->
+    <section id="tab-schedule" class="tab-panel" role="tabpanel">
+      <div class="schedule-head">
+        <div>
+          <h2>排程</h2>
+          <p class="oneclick__subtitle" style="margin-top:4px;">定時自動執行智能採購建單流程</p>
+        </div>
+        <button class="btn btn--primary" id="scheduleNew">+ 新增排程</button>
+      </div>
+
+      <div id="scheduleEditor" class="schedule-editor" style="display:none;">
+        <h3 class="schedule-editor__title">新增 / 編輯 排程</h3>
+        <div class="schedule-editor__grid">
+          <div class="field">
+            <label class="field__label">排程名稱</label>
+            <input type="text" id="schName" placeholder="例：每天早上 9 點 Indo 採購" />
+          </div>
+          <div class="field">
+            <label class="field__label">觸發類型</label>
+            <select id="schType">
+              <option value="daily">每日固定時間</option>
+              <option value="once">一次性指定時間</option>
+            </select>
+          </div>
+          <div class="field" id="schTimeField">
+            <label class="field__label">每日時間 (HH:MM)</label>
+            <input type="time" id="schTime" value="09:00" />
+          </div>
+          <div class="field" id="schDatetimeField" style="display:none;">
+            <label class="field__label">執行日期時間</label>
+            <input type="datetime-local" id="schDatetime" />
+          </div>
+        </div>
+        <h4 class="schedule-editor__subtitle">採購條件</h4>
+        <div class="schedule-editor__grid">
+          <div class="field">
+            <label class="field__label">關鍵字類型</label>
+            <select id="schKeywordType">
+              <option value="Keyword">標籤</option>
+              <option value="ProductName">商品名稱</option>
+              <option value="ProductCode">主貨號</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field__label">關鍵字</label>
+            <input type="text" id="schKeyword" placeholder="Indo" />
+          </div>
+          <div class="field">
+            <label class="field__label">需求算式</label>
+            <select id="schCardinality">
+              <option value="SafetyStock">安全庫存</option>
+              <option value="SalesCount7">7 日銷量</option>
+              <option value="SalesCount15">15 日銷量</option>
+              <option value="SalesCount30" selected>30 日銷量</option>
+              <option value="SalesCount60">60 日銷量</option>
+              <option value="SalesCount90">90 日銷量</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field__label">倍率 (%)</label>
+            <input type="number" id="schPercent" value="150" min="1" max="999" />
+          </div>
+          <div class="field">
+            <label class="field__label">採購平台</label>
+            <input type="text" id="schPlatform" placeholder="indo-Office" />
+          </div>
+        </div>
+        <div class="schedule-editor__options">
+          <label class="checkbox-field">
+            <input type="checkbox" id="schExecute" />
+            EXECUTE 模式（會實際在 ERP 建單）
+          </label>
+        </div>
+        <div class="schedule-editor__actions">
+          <button class="btn btn--ghost" id="schCancel">取消</button>
+          <button class="btn btn--primary" id="schSave">儲存</button>
+        </div>
+      </div>
+
+      <div id="scheduleList" class="schedule-list"></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
