@@ -133,45 +133,45 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-50);
-  letter-spacing: 0.02em;
 }
-.app-meta__sep { color: var(--ink-20); }
 
-.session-pill {
+/* Admin toggle — 右上角，員工版低調，管理員模式 active 時顯眼 */
+.admin-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 3px 9px;
+  gap: 6px;
+  padding: 5px 11px;
   border-radius: 2px;
   border: 1px solid var(--ink-12);
   background: var(--paper);
+  color: var(--ink-50);
   font-family: var(--font-mono);
   font-size: 10.5px;
-  letter-spacing: 0.04em;
-  color: var(--ink-65);
+  font-weight: 500;
+  letter-spacing: 0.06em;
   cursor: pointer;
   transition: all var(--t-fast);
 }
-.session-pill:hover {
+.admin-toggle:hover {
   border-color: var(--ink-35);
   color: var(--ink-100);
 }
-.session-pill__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ink-35);
+.admin-toggle__icon {
+  font-size: 13px;
+  line-height: 1;
 }
-.session-pill[data-status="valid"]    .session-pill__dot { background: var(--success); }
-.session-pill[data-status="expired"]  .session-pill__dot { background: var(--danger); }
-.session-pill[data-status="unknown"]  .session-pill__dot { background: var(--warning); }
-.session-pill[data-status="checking"] .session-pill__dot {
-  background: var(--ink-50);
-  animation: pulse 1.1s ease-in-out infinite;
+.admin-toggle.is-active {
+  background: var(--purchase);
+  color: #fff;
+  border-color: var(--purchase);
 }
+.admin-toggle.is-active:hover {
+  background: var(--purchase-deep);
+  border-color: var(--purchase-deep);
+}
+
+/* Admin-only：員工視圖隱藏，body.is-admin 時恢復原本 display */
+body:not(.is-admin) .admin-only { display: none !important; }
 
 /* -------------------------------------------------- Top Tabs */
 .tabs--top {
@@ -504,6 +504,20 @@ main {
   gap: 12px;
   padding: 14px 22px;
 }
+body:not(.is-admin) .action-card__row { padding: 28px 26px 30px; }
+body:not(.is-admin) .action-card__buttons {
+  gap: 14px;
+  justify-content: center;  /* 員工模式按鈕居中,搭配自然寬度更像 button 不像 banner */
+}
+body:not(.is-admin) #btnStop {
+  min-width: 200px;
+  justify-content: center;
+  padding: 18px 32px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 6px;
+}
 .action-card__warning {
   font-size: 12px;
   background: var(--danger-soft);
@@ -574,6 +588,46 @@ main {
   padding: 10px 22px;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Hero 級按鈕 — 員工版「執行採購」用，鋪滿、字大、有立體陰影 */
+.btn--hero {
+  padding: 20px 28px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border-radius: 6px;
+}
+/* 員工模式下 hero 按鈕：大但保持「按鈕形狀」— 自然寬度 + 居中 + 浮起感陰影 */
+body:not(.is-admin) .btn--hero {
+  min-width: 380px;
+  justify-content: center;  /* .btn 是 inline-flex,寬度被撐開時文字會靠左,要主動置中 */
+  padding: 18px 56px;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  box-shadow:
+    0 1px 0 var(--purchase-deep),
+    0 4px 12px rgba(45, 106, 79, 0.22);
+}
+body:not(.is-admin) .btn--hero:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    0 2px 0 var(--purchase-deep),
+    0 6px 16px rgba(45, 106, 79, 0.28);
+}
+body:not(.is-admin) .btn--hero:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    0 0 0 var(--purchase-deep),
+    0 2px 6px rgba(45, 106, 79, 0.2);
+}
+/* 管理員模式：hero 按鈕回到一般 btn--lg 大小，跟其他按鈕並排 */
+body.is-admin .btn--hero {
+  padding: 10px 22px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: var(--radius);
 }
 
 /* -------------------------------------------------- Status Pills */

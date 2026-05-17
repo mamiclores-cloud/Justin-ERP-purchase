@@ -151,17 +151,6 @@
     };
   }
 
-  function refreshModeBadge() {
-    const badge = $('#modeBadge');
-    if (window.__lastWasExecute) {
-      badge.textContent = 'EXECUTE MODE';
-      badge.style.background = '#fef2f2'; badge.style.color = '#b91c1c'; badge.style.borderColor = '#fecaca';
-    } else {
-      badge.textContent = 'DRY-RUN MODE';
-      badge.style.background = ''; badge.style.color = ''; badge.style.borderColor = '';
-    }
-  }
-
   async function startRun(view, params, execute) {
     if (activeJobId) { alert('已有任務正在執行中，請先停止或等待完成'); return; }
 
@@ -171,7 +160,7 @@
     }
     if (execute) {
       const onlyText = params.only ? `\n限定貨號: ${params.only}` : '';
-      const msg = `WARNING — EXECUTE 模式會實際在 ERP 建立採購單。\n\n` +
+      const msg = `即將實際在 ERP 建立採購單。\n\n` +
                   `關鍵字: ${params.keyword || '(空)'} (${params.keywordType})\n` +
                   `算式: ${params.cardinality} × ${params.percent}%\n` +
                   `平台: ${params.platform}` + onlyText +
@@ -184,8 +173,6 @@
     setViewStatus(view, 'running', execute ? 'EXECUTE' : 'DRY-RUN');
     view.buttons.forEach((b) => { b.disabled = true; });
     if (view.stopBtn) view.stopBtn.style.display = '';
-    window.__lastWasExecute = execute;
-    refreshModeBadge();
 
     try {
       const r = await fetch('/api/start', {
@@ -590,43 +577,29 @@
   updateAnomalyBadge();
   setInterval(updateAnomalyBadge, 15000);
 
-  /* ========== Session status pill ========== */
-  function fmtAgo(ts) {
-    if (!ts) return '--';
-    const diff = Date.now() - ts;
-    const m = Math.round(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return m + 'm ago';
-    const h = Math.floor(m / 60);
-    if (h < 24) return h + 'h ago';
-    return Math.floor(h / 24) + 'd ago';
-  }
-  async function refreshSessionStatus() {
-    try {
-      const r = await fetch('/api/session-status');
-      const data = await r.json();
-      const pill = $('#sessionStatus');
-      let status = data.status || 'unknown';
-      if (data.inProgress) status = 'checking';
-      pill.dataset.status = status;
-      const ago = fmtAgo(data.lastSuccess || data.lastCheck);
-      $('.session-pill__text', pill).textContent = `session: ${status} · ${ago}`;
-    } catch (e) {
-      const pill = $('#sessionStatus');
-      pill.dataset.status = 'unknown';
-      $('.session-pill__text', pill).textContent = 'session: error';
+  /* ========== Admin mode toggle ========== */
+  // 員工預設視圖只看到「一鍵完成」+「異常紀錄」+「排程」與「執行採購」按鈕。
+  // 點右上角「⚙ 管理員」展開測試用元素：分步執行 sub-tab、DRY-RUN 按鈕、管理員 badge。
+  // 狀態存 localStorage，刷新後維持。
+  const adminToggleBtn = $('#adminToggle');
+  function applyAdminMode(isAdmin) {
+    document.body.classList.toggle('is-admin', isAdmin);
+    $('.admin-toggle__text', adminToggleBtn).textContent = isAdmin ? '退出管理員' : '管理員';
+    adminToggleBtn.classList.toggle('is-active', isAdmin);
+    if (!isAdmin) {
+      // 退出管理員時，若停留在分步執行 sub-tab，強制切回「一鍵完成」，
+      // 否則 admin-only 把分步 panel 隱藏後使用者會看到空白
+      $$('.tabs--sub .tab').forEach((t) =>
+        t.classList.toggle('is-active', t.dataset.subtab === 'purchase-oneclick'));
+      $$('.sub-panel').forEach((p) =>
+        p.classList.toggle('is-active', p.id === 'subtab-purchase-oneclick'));
     }
+    try { localStorage.setItem('isAdmin', isAdmin ? '1' : '0'); } catch {}
   }
-  $('#sessionStatus').addEventListener('click', async () => {
-    const pill = $('#sessionStatus');
-    pill.dataset.status = 'checking';
-    $('.session-pill__text', pill).textContent = 'session: checking...';
-    await fetch('/api/session-refresh', { method: 'POST' }).catch(() => {});
-    setTimeout(refreshSessionStatus, 6000);
+  adminToggleBtn.addEventListener('click', () => {
+    applyAdminMode(!document.body.classList.contains('is-admin'));
   });
-  refreshSessionStatus();
-  setInterval(refreshSessionStatus, 60 * 1000);
-
-  /* ========== Boot ========== */
-  refreshModeBadge();
+  applyAdminMode((() => {
+    try { return localStorage.getItem('isAdmin') === '1'; } catch { return false; }
+  })());
 })();

@@ -24,6 +24,91 @@ const PORT = parseInt(process.env.PORT || '3001', 10);  // 避開 distribution-p
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
 const ANOMALY_LOG = path.join(__dirname, 'state', 'anomalies.jsonl');
+// EXECUTE 模式跑完會把本次異常匯出到這個資料夾,員工直接到 Windows 檔案總管找
+const EXPORT_DIR = path.join(__dirname, '異常紀錄');
+
+/* ============ Anomaly CSV helpers(server-side filter + auto export 共用)============ */
+const ANOMALY_TYPE_LABEL = {
+  'insufficient-quantity': '數量不足',
+  'stop-spec-skipped':     'STOP 故沒訂購',
+};
+
+// 跟 lib/purchase-rules.js 的 CARDINALITY_OPTIONS 對齊;這邊複製一份避免 server.js 載入業務 lib
+const CARDINALITY_LABEL = {
+  'SafetyStock':   '安全庫存',
+  'SalesCount7':   '7日銷量',
+  'SalesCount15':  '15日銷量',
+  'SalesCount30':  '30日銷量',
+  'SalesCount60':  '60日銷量',
+  'SalesCount90':  '90日銷量',
+};
+
+function csvEsc(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  // CSV 規範:含 , " \n 或前後空白 都加雙引號,內部雙引號 → 雙雙引號
+  if (/[,"\r\n]/.test(s) || /^\s|\s$/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function csvFmtDate(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// 把 anomalies array 變成 CSV 文字(含 UTF-8 BOM,Excel 直開不亂碼)
+function buildAnomaliesCsv(list) {
+  const headers = ['時間', '模式', '需求算式', '倍率', '貨號', '商品名稱', '異常類型', '異常訊息', '規格', '建議採購量', '規格加總', '門檻', 'Tags', 'RunId'];
+  const rows = list.map((a) => [
+    csvFmtDate(a.time),
+    (a.mode || '').toUpperCase(),
+    CARDINALITY_LABEL[a.cardinality] || a.cardinality || '',
+    (a.percent !== undefined && a.percent !== null && a.percent !== '') ? `${a.percent}%` : '',
+    a.mainId || '',
+    a.productName || '',
+    ANOMALY_TYPE_LABEL[a.type] || a.type || '',
+    a.message || '',
+    a.specLabel || (Array.isArray(a.specs) ? a.specs.map((s) => `${s.label} qty=${s.qty}`).join(' | ') : ''),
+    a.suggestedQty ?? '',
+    a.rawSum ?? '',
+    a.threshold ?? '',
+    Array.isArray(a.tags) ? a.tags.join(',') : '',
+    a.runId || '',
+  ].map(csvEsc).join(','));
+  return '﻿' + [headers.map(csvEsc).join(',')].concat(rows).join('\r\n');
+}
+
+// Job 結束時呼叫:把本次 job 的異常 (filter runId === jobId) 匯出到 EXPORT_DIR
+// dry-run / execute 都會匯;沒異常也建一個標「-無異常」的空檔,讓員工有明確結果可查
+// 檔名格式:異常紀錄-yyyymmdd-時分.csv  (無異常時加 -無異常 後綴)
+function exportJobAnomalies(jobId) {
+  try {
+    let list = [];
+    if (fs.existsSync(ANOMALY_LOG)) {
+      list = fs.readFileSync(ANOMALY_LOG, 'utf8')
+        .split(/\r?\n/).filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((a) => a && a.runId === jobId);
+      list.sort((a, b) => b.time - a.time);
+    }
+    if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const suffix = list.length === 0 ? '-無異常' : '';
+    const fname = `異常紀錄-${stamp}${suffix}.csv`;
+    const fpath = path.join(EXPORT_DIR, fname);
+    fs.writeFileSync(fpath, buildAnomaliesCsv(list));
+    return { path: fpath, count: list.length };
+  } catch (e) {
+    console.error('[export-anomalies] error:', e.message);
+    return null;
+  }
+}
 
 /* ============ 步驟註冊表 ============ */
 // 智能採購只有一支主腳本，但保留 step 結構讓 UI 一致
@@ -120,6 +205,20 @@ function startJob(stepKey, params) {
     job.exitCode = code;
     job.finishedAt = Date.now();
     console.log(`[server] job ${jobId} finished, exit=${code}, logs=${job.logs.length}`);
+
+    // Job 跑完自動匯出本次的異常到「異常紀錄/」資料夾(dry-run / execute 都匯,無異常也建空檔)
+    if (code === 0) {
+      const out = exportJobAnomalies(jobId);
+      if (out) {
+        const msg = out.count > 0
+          ? `[server] 已自動匯出 ${out.count} 筆異常 → ${out.path}`
+          : `[server] 本次無異常,已建立紀錄 → ${out.path}`;
+        console.log(msg);
+        job.logs.push({ time: Date.now(), stream: 'stdout', text: msg });
+        job.exportedCsvPath = out.path;
+      }
+    }
+
     if (code === 0) markSessionValidFromJob();
   });
   child.on('error', (err) => {
@@ -457,7 +556,7 @@ async function handleApi(req, res, urlPath) {
     return jsonResp(res, 200, { anomalies: list, total: list.length });
   }
 
-  // GET /api/anomalies.csv — 匯出 CSV（含 UTF-8 BOM 讓 Excel 開不亂碼）
+  // GET /api/anomalies.csv — 匯出 CSV(含 UTF-8 BOM 讓 Excel 開不亂碼)
   if (req.method === 'GET' && urlPath === '/api/anomalies.csv') {
     const u = new URL(req.url, 'http://x');
     const type  = u.searchParams.get('type') || '';
@@ -471,45 +570,7 @@ async function handleApi(req, res, urlPath) {
       (a.message || '').toLowerCase().includes(q));
     list.sort((a, b) => b.time - a.time);
 
-    const TYPE_LABEL = {
-      'insufficient-quantity': '數量不足',
-      'stop-spec-skipped':     'STOP 故沒訂購',
-    };
-
-    function esc(v) {
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      // CSV 規範：含 , " \n 或前後空白 都加雙引號，內部雙引號 → 雙雙引號
-      if (/[,"\r\n]/.test(s) || /^\s|\s$/.test(s)) {
-        return '"' + s.replace(/"/g, '""') + '"';
-      }
-      return s;
-    }
-    function fmtDate(ms) {
-      if (!ms) return '';
-      const d = new Date(ms);
-      const pad = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-    }
-
-    const headers = ['時間', '模式', '貨號', '商品名稱', '異常類型', '異常訊息', '規格', '建議採購量', '規格加總', '門檻', 'Tags', 'RunId'];
-    const rows = list.map((a) => [
-      fmtDate(a.time),
-      (a.mode || '').toUpperCase(),
-      a.mainId || '',
-      a.productName || '',
-      TYPE_LABEL[a.type] || a.type || '',
-      a.message || '',
-      // 規格欄位：stop-spec-skipped 用 specLabel；insufficient-quantity 用 specs 陣列
-      a.specLabel || (Array.isArray(a.specs) ? a.specs.map((s) => `${s.label} qty=${s.qty}`).join(' | ') : ''),
-      a.suggestedQty ?? '',
-      a.rawSum ?? '',
-      a.threshold ?? '',
-      Array.isArray(a.tags) ? a.tags.join(',') : '',
-      a.runId || '',
-    ].map(esc).join(','));
-
-    const csvText = '﻿' + [headers.map(esc).join(',')].concat(rows).join('\r\n');
+    const csvText = buildAnomaliesCsv(list);
     const d = new Date();
     const fname = `anomalies-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}.csv`;
     res.writeHead(200, {

@@ -14,6 +14,7 @@ chrome-profile.bak-*/
 recordings/
 state/
 schedules.json
+異常紀錄/
 
 # ===== 偵察用資料（含 ERP 內部資訊）=====
 analysis/
@@ -35,3 +36,4 @@ __tmp-*.js
 Thumbs.db
 *.swp
 *.swo
+*.lnk

@@ -51,7 +51,7 @@ const ANOMALY_LOG = path.join(__dirname, 'state', 'anomalies.jsonl');
 const RUN_ID = process.env.PURCHASE_RUN_ID || ('cli-' + Date.now().toString(36));
 const RECORDED_TYPES = new Set(['insufficient-quantity', 'stop-spec-skipped']);
 
-function appendAnomalies(decision, mode) {
+function appendAnomalies(decision, mode, opts) {
   if (!decision.anomalies || decision.anomalies.length === 0) return;
   const filtered = decision.anomalies.filter((a) => RECORDED_TYPES.has(a.type));
   if (filtered.length === 0) return;
@@ -62,7 +62,11 @@ function appendAnomalies(decision, mode) {
   const lines = filtered.map((a) => JSON.stringify({
     time: now,
     runId: RUN_ID,
-    mode,                                       // 'execute' only
+    mode,                                       // 'execute' or 'dry-run'
+    // 執行條件 — 同商品在不同 cardinality / percent 下算出的需求量不同,
+    // 員工檢視 CSV 要靠這兩欄區分「這是哪個條件跑出來的異常」
+    cardinality: opts?.cardinality,
+    percent: opts?.percent,
     mainId: decision.mainId,
     productName: decision.productName || '',
     type: a.type,
@@ -214,7 +218,7 @@ function formatDecision(d) {
     console.log('');
 
     // 即時 append 異常到檔（dry-run 也寫，方便測試規則是否正確；mode 欄位區分）
-    try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run'); }
+    try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run', opts); }
     catch (e) { log(`  (warn) anomaly log append failed: ${e.message}`); }
   }
 

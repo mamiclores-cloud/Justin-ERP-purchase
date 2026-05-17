@@ -13,16 +13,14 @@
   <header class="app-header">
     <div class="app-header__row">
       <h1 class="app-title">
-        智能採購 / 自動化控制台
-        <span class="app-title__badge" id="modeBadge">DRY-RUN</span>
+        智能採購建單
+        <span class="app-title__badge admin-only" id="adminBadge">管理員模式</span>
       </h1>
       <div class="app-meta">
-        <button id="sessionStatus" class="session-pill" title="點擊手動 refresh session">
-          <span class="session-pill__dot"></span>
-          <span class="session-pill__text">session: --</span>
+        <button id="adminToggle" class="admin-toggle" title="切換管理員模式">
+          <span class="admin-toggle__icon" aria-hidden="true">⚙</span>
+          <span class="admin-toggle__text">管理員</span>
         </button>
-        <span class="app-meta__sep">·</span>
-        <span id="serverInfo">srv01.ajinerp.com</span>
       </div>
     </div>
   </header>
@@ -45,22 +43,13 @@
     <!-- 01 智能採購建單 -->
     <!-- ============================================================== -->
     <section id="tab-purchase" class="tab-panel system-panel system-panel--purchase is-active" role="tabpanel">
-      <div class="system-banner system-banner--purchase">
-        <div class="system-banner__col-label">
-          <div class="eyebrow">System / 01</div>
-        </div>
-        <div class="system-banner__col-content">
-          <h2 class="system-banner__title">智能採購建單</h2>
-        </div>
-      </div>
-
-      <nav class="tabs--sub">
-        <button class="tab is-active" data-subtab="purchase-steps">分步執行（單一貨號）</button>
-        <button class="tab" data-subtab="purchase-oneclick">一鍵完成（全部）</button>
+      <nav class="tabs--sub admin-only">
+        <button class="tab is-active" data-subtab="purchase-oneclick">一鍵完成</button>
+        <button class="tab" data-subtab="purchase-steps">分步執行（單一貨號 / 測試）</button>
       </nav>
 
-      <!-- ========== 分步執行 sub-panel ========== -->
-      <section id="subtab-purchase-steps" class="sub-panel is-active">
+      <!-- ========== 分步執行 sub-panel（admin only / 測試用） ========== -->
+      <section id="subtab-purchase-steps" class="sub-panel admin-only">
         <div class="single-bar">
           <div class="single-bar__label">單一貨號模式</div>
           <div class="single-bar__grid">
@@ -154,8 +143,8 @@
         </div>
       </section>
 
-      <!-- ========== 一鍵完成 sub-panel ========== -->
-      <section id="subtab-purchase-oneclick" class="sub-panel">
+      <!-- ========== 一鍵完成 sub-panel（員工預設視圖） ========== -->
+      <section id="subtab-purchase-oneclick" class="sub-panel is-active">
         <section class="form-card">
           <h3 class="section-title">搜尋條件</h3>
           <div class="form-grid">
@@ -212,13 +201,10 @@
 
         <section class="action-card">
           <div class="action-card__row">
-            <div class="action-card__warning" id="executeWarning" style="display:none;">
-              <strong>WARNING —</strong> EXECUTE 模式會實際在 ERP 建立採購單，請先 DRY-RUN 確認決策正確。
-            </div>
             <div class="action-card__buttons">
-              <span class="status status--idle" id="runStatus"><span class="status__dot"></span>idle</span>
-              <button class="btn btn--ghost" id="btnDryRun">預覽 (Dry-Run)</button>
-              <button class="btn btn--primary btn--lg" id="btnExecute">真執行 (EXECUTE)</button>
+              <span class="status status--idle admin-only" id="runStatus"><span class="status__dot"></span>idle</span>
+              <button class="btn btn--ghost admin-only" id="btnDryRun">預覽 (Dry-Run)</button>
+              <button class="btn btn--primary btn--lg btn--hero" id="btnExecute">執行採購</button>
               <button class="btn btn--danger" id="btnStop" style="display:none;">停止</button>
             </div>
           </div>
