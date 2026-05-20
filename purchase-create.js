@@ -350,14 +350,29 @@ async function run1688(opts, api) {
   const p1results = await postDecisions(p1create, opts, api, 'P1-');
   totalResults.push(...p1results);
 
-  /* ── Phase 2：SKSP 共同採購（單品查詢模式跳過）── */
+  /* ── Phase 2：SKSP 共同採購 ──
+     --only 模式特別處理:
+       - 若 --only 商品有 SKSP 標籤 → Phase 2 跑,但只跑相關群組(管理員測合單預覽用)
+       - 若 --only 商品無 SKSP → 整個 Phase 2 跳過(單品查詢不適用合單)
+  */
+  let onlySkspCodes = null;
   if (opts.only) {
-    log(`\n[1688] --only 已設定，跳過 Phase 2 SKSP 合單（單品查詢模式）`);
-    log(`\n${'='.repeat(60)}`);
-    log(`=== [1688] 總結 ===`);
-    log(`${'='.repeat(60)}`);
-    printSummary(allDecisions, totalResults, opts);
-    return;
+    onlySkspCodes = new Set();
+    for (const d of p1decisions) {
+      if (d.decision === 'skip-tag-excluded') {
+        const sksp = getSkspCode(d.tags);
+        if (sksp) onlySkspCodes.add(sksp);
+      }
+    }
+    if (onlySkspCodes.size === 0) {
+      log(`\n[1688] --only 已設定且無 SKSP 商品,跳過 Phase 2 SKSP 合單`);
+      log(`\n${'='.repeat(60)}`);
+      log(`=== [1688] 總結 ===`);
+      log(`${'='.repeat(60)}`);
+      printSummary(allDecisions, totalResults, opts);
+      return;
+    }
+    log(`\n[1688] --only 偵測到 SKSP 商品,Phase 2 只跑相關群組: ${[...onlySkspCodes].join(', ')}`);
   }
 
   log(`\n${'='.repeat(60)}`);
@@ -395,14 +410,19 @@ async function run1688(opts, api) {
       excludeTags: EXCLUDE_SKSP,
     });
     skspDecisions.push(d);
-    if (d.decision === 'create' || d.decision === 'skip-no-needpurchase') {
+    // --only 模式:只印 / 只計相關 SKSP 群組的商品(避免雜訊)
+    const skspCode = getSkspCode(d.tags);
+    const relevant = !onlySkspCodes || (skspCode && onlySkspCodes.has(skspCode));
+    if (relevant && (d.decision === 'create' || d.decision === 'skip-no-needpurchase')) {
       console.log(formatDecision(d));
       console.log('');
     }
-    try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run', opts); }
-    catch (e) { log(`  (warn) anomaly log append failed: ${e.message}`); }
+    if (relevant) {
+      try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run', opts); }
+      catch (e) { log(`  (warn) anomaly log append failed: ${e.message}`); }
+      allDecisions.push(d);
+    }
   }
-  allDecisions.push(...skspDecisions);
 
   // 依 SKSP 代碼分組（只取 create 決策）
   const skspGroups = {};
@@ -410,12 +430,14 @@ async function run1688(opts, api) {
     if (d.decision !== 'create') continue;
     const code = getSkspCode(d.tags);
     if (!code) continue;  // 無 SKSPxxx 代碼就跳過（不合單）
+    // --only 模式:只保留相關群組
+    if (onlySkspCodes && !onlySkspCodes.has(code)) continue;
     if (!skspGroups[code]) skspGroups[code] = [];
     skspGroups[code].push(d);
   }
 
   const groupCodes = Object.keys(skspGroups);
-  log(`\n  SKSP 分組數量：${groupCodes.length} 組`);
+  log(`\n  SKSP 分組數量：${groupCodes.length} 組${onlySkspCodes ? ` (--only 過濾後)` : ''}`);
 
   // 對每組做合單門檻判斷 + POST
   let groupIdx = 0;
