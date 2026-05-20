@@ -177,17 +177,31 @@ function formatDecision(d) {
 /* ============ 共用：搜尋 + 決策 + POST 單商品單（Indo / 1688 phase1 用）============ */
 
 async function fetchAndDecide(api, fetchParams, decideOpts, opts) {
-  const res = await api.Purchase.intelligentList({
-    length: 999,
-    KeywordType: fetchParams.keywordType || 'Keyword',
-    Keyword: fetchParams.keyword || '',
-    supplier: opts.supplier || '',
-    cardinality: opts.cardinality,
-    percent: opts.percent,
-  });
+  log(`  正在向 ERP 查詢智能採購清單 (KeywordType=${fetchParams.keywordType || 'Keyword'}, cardinality=${opts.cardinality} × ${opts.percent}%) ...`);
+  log(`  (重型查詢可能需要 30-180 秒,請耐心等候,進度每 15 秒回報一次)`);
+  const queryStart = Date.now();
+  // 每 15 秒回報「還在等」避免使用者以為卡死
+  const heartbeat = setInterval(() => {
+    const elapsed = ((Date.now() - queryStart) / 1000).toFixed(0);
+    log(`  ... 仍在等 ERP 回應 (已等 ${elapsed} 秒)`);
+  }, 15000);
+  let res;
+  try {
+    res = await api.Purchase.intelligentList({
+      length: 999,
+      KeywordType: fetchParams.keywordType || 'Keyword',
+      Keyword: fetchParams.keyword || '',
+      supplier: opts.supplier || '',
+      cardinality: opts.cardinality,
+      percent: opts.percent,
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
+  const elapsed = ((Date.now() - queryStart) / 1000).toFixed(1);
   const products = res.list || [];
   const total = res.recordsTotal ?? res.recordsFiltered ?? products.length;
-  log(`  fetched ${products.length} products  (recordsTotal=${total})`);
+  log(`  fetched ${products.length} products  (recordsTotal=${total}, 耗時 ${elapsed}s)`);
 
   const onlySet = opts.only ? new Set(opts.only.split(',').map((s) => s.trim()).filter(Boolean)) : null;
   const decisions = [];
@@ -350,16 +364,28 @@ async function run1688(opts, api) {
   log(`=== [1688 Phase 2] SKSP 共同採購 (threshold ≥ ${THRESHOLD_1688}) ===`);
   log(`${'='.repeat(60)}\n`);
 
-  const skspRes = await api.Purchase.intelligentList({
-    length: 999,
-    KeywordType: 'Keyword',
-    Keyword: 'SKSP',
-    supplier: opts.supplier || '',
-    cardinality: opts.cardinality,
-    percent: opts.percent,
-  });
+  log(`  正在向 ERP 查詢 SKSP 商品清單 ...`);
+  const skspStart = Date.now();
+  const skspHeartbeat = setInterval(() => {
+    const elapsed = ((Date.now() - skspStart) / 1000).toFixed(0);
+    log(`  ... 仍在等 ERP 回應 (已等 ${elapsed} 秒)`);
+  }, 15000);
+  let skspRes;
+  try {
+    skspRes = await api.Purchase.intelligentList({
+      length: 999,
+      KeywordType: 'Keyword',
+      Keyword: 'SKSP',
+      supplier: opts.supplier || '',
+      cardinality: opts.cardinality,
+      percent: opts.percent,
+    });
+  } finally {
+    clearInterval(skspHeartbeat);
+  }
+  const skspElapsed = ((Date.now() - skspStart) / 1000).toFixed(1);
   const skspProducts = skspRes.list || [];
-  log(`  fetched ${skspProducts.length} SKSP products`);
+  log(`  fetched ${skspProducts.length} SKSP products  (耗時 ${skspElapsed}s)`);
 
   // 對每個 SKSP 商品決策（threshold=0，門檻判斷在合單層）
   const skspDecisions = [];
