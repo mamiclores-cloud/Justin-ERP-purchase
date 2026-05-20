@@ -143,6 +143,7 @@ function buildArgs(stepKey, params) {
   if (params.percent !== undefined && params.percent !== null && params.percent !== '') {
     args.push('--percent', String(params.percent));
   }
+  if (params.workflow)    args.push('--workflow', String(params.workflow));
   if (params.platform)    args.push('--platform', String(params.platform));
   if (params.threshold !== undefined && params.threshold !== null && params.threshold !== '') {
     args.push('--threshold', String(params.threshold));
@@ -286,8 +287,8 @@ function loadSchedules() {
 }
 function saveSchedules() {
   fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(
-    schedules.map(({ id, name, enabled, type, time, datetime, options, lastRun, nextRun }) =>
-      ({ id, name, enabled, type, time, datetime, options, lastRun, nextRun })), null, 2));
+    schedules.map(({ id, name, enabled, type, time, datetime, weekdays, options, lastRun, nextRun }) =>
+      ({ id, name, enabled, type, time, datetime, weekdays, options, lastRun, nextRun })), null, 2));
 }
 function computeNextFire(s) {
   if (s.type === 'once') {
@@ -300,6 +301,23 @@ function computeNextFire(s) {
     fire.setHours(h, m, 0, 0);
     if (fire.getTime() <= Date.now()) fire.setDate(fire.getDate() + 1);
     return fire.getTime();
+  }
+  if (s.type === 'weekly') {
+    // weekdays: number[] (0=日, 1=一, ..., 6=六,對應 JS Date.getDay())
+    const days = Array.isArray(s.weekdays)
+      ? s.weekdays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+      : [];
+    if (days.length === 0) return null;
+    const [h, m] = (s.time || '00:00').split(':').map(Number);
+    const now = Date.now();
+    // 從今天起找 8 天內最近一個符合 weekday 且時間 > now 的時間點
+    for (let offset = 0; offset < 8; offset++) {
+      const cand = new Date();
+      cand.setDate(cand.getDate() + offset);
+      cand.setHours(h, m, 0, 0);
+      if (cand.getTime() > now && days.includes(cand.getDay())) return cand.getTime();
+    }
+    return null;
   }
   return null;
 }
@@ -329,7 +347,7 @@ async function fireSchedule(id) {
     s.lastRun = { startedAt, finishedAt: Date.now(), state: 'failed', error: e.message };
   }
   saveSchedules();
-  if (s.type === 'daily' && s.enabled) scheduleFire(s);
+  if ((s.type === 'daily' || s.type === 'weekly') && s.enabled) scheduleFire(s);
   else { s.enabled = false; saveSchedules(); }
 }
 function uuid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -468,8 +486,8 @@ async function handleApi(req, res, urlPath) {
     return jsonResp(res, 200, {
       schedules: schedules.map((s) => ({
         id: s.id, name: s.name, enabled: s.enabled, type: s.type,
-        time: s.time, datetime: s.datetime, options: s.options,
-        lastRun: s.lastRun, nextRun: s.nextRun,
+        time: s.time, datetime: s.datetime, weekdays: s.weekdays,
+        options: s.options, lastRun: s.lastRun, nextRun: s.nextRun,
       })),
     });
   }
@@ -478,13 +496,17 @@ async function handleApi(req, res, urlPath) {
       const body = await readBody(req);
       const p = JSON.parse(body || '{}');
       if (!p.name || !p.type) return jsonResp(res, 400, { error: 'name and type required' });
+      const type = ['daily', 'weekly', 'once'].includes(p.type) ? p.type : 'daily';
       const s = {
         id: uuid(),
         name: String(p.name).slice(0, 60),
         enabled: p.enabled !== false,
-        type: p.type === 'once' ? 'once' : 'daily',
+        type,
         time: p.time || null,
         datetime: p.datetime || null,
+        weekdays: Array.isArray(p.weekdays)
+          ? p.weekdays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+          : null,
         options: p.options || {},
         lastRun: null, nextRun: null,
       };
@@ -503,9 +525,14 @@ async function handleApi(req, res, urlPath) {
       const p = JSON.parse(body || '{}');
       if (p.name !== undefined)     s.name = String(p.name).slice(0, 60);
       if (p.enabled !== undefined)  s.enabled = !!p.enabled;
-      if (p.type !== undefined)     s.type = p.type === 'once' ? 'once' : 'daily';
+      if (p.type !== undefined)     s.type = ['daily', 'weekly', 'once'].includes(p.type) ? p.type : 'daily';
       if (p.time !== undefined)     s.time = p.time;
       if (p.datetime !== undefined) s.datetime = p.datetime;
+      if (p.weekdays !== undefined) {
+        s.weekdays = Array.isArray(p.weekdays)
+          ? p.weekdays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+          : null;
+      }
       if (p.options !== undefined)  s.options = p.options;
       scheduleFire(s); saveSchedules();
       return jsonResp(res, 200, { schedule: s });

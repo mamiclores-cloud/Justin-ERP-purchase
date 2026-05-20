@@ -4,11 +4,19 @@
 
 把原本 UI 上要逐張慢慢點的智能採購建單作業，壓縮成**輸入條件 → 一鍵建單 → 異常自動分類記錄**。HTTP-direct，不靠 UI 自動化。
 
+支援兩種工作流程：
+
+| Workflow | 搜尋方式 | 加總門檻 | 標籤排除 | 特殊 |
+|---|---|---|---|---|
+| **Indo** | `Keyword='Indo'` | ≥ 6 | 無 | — |
+| **1688** | `keywordType='ALL'` 廣泛 | ≥ 3 | 排除 `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+
 對應流程（客戶逐字稿）：
 - 1️⃣ 設定搜尋條件 → 拉候選商品
-- 2️⃣ 套訂購條件（**規格加總 ≥ 6** + **NX 倍數**）
-- 3️⃣ 不訂購原則（**STOP 規格跳過**）
-- 4️⃣ 異常回報（數量不足 / STOP 故沒訂購）
+- 2️⃣ 套訂購條件（**規格加總 ≥ 門檻** + **NX 倍數**）
+- 3️⃣ 不訂購原則（**STOP 規格跳過** + **1688 標籤排除**）
+- 4️⃣ 共同採購（**1688 only**：SKSP 同代碼合單）
+- 5️⃣ 異常回報（數量不足 / STOP 故沒訂購）
 
 ---
 
@@ -118,17 +126,82 @@ flowchart TD
     class RealEnd,DryEnd ok
 ```
 
-**重點規則** ([完整對應逐字稿 1-6.txt + 鞏固版 (1).txt]):
+**重點規則** ([完整對應逐字稿 1-6.txt + 鞏固版 (1).txt + 補充-共同採購.txt]):
 
-| KeyWord 含 | 規則 |
-|---|---|
-| `NX`（例 `12X`、`6X`、`8X`）| 每個有 `needpurchaseQty` 的規格，無條件進位到 N 的倍數 |
-| `STOP` | 進 `product.Remark` 讀 `STOP : <規格清單>`，列名的規格整個跳過（per-spec 記異常） |
-| 其他（`Indo` / `YLL` / `2M` ...）| 一律忽略 |
+| KeyWord 含 | 規則 | 兩 workflow 行為 |
+|---|---|---|
+| `NX`（例 `12X`、`6X`、`8X`）| 每個有 `needpurchaseQty` 的規格，無條件進位到 N 的倍數 | 通用 |
+| `STOP` | 進 `product.Remark` 讀 `STOP : <規格清單>`，列名的規格整個跳過（per-spec 記異常）；Remark 沒列規格 → 整品跳過 | 通用 |
+| `Indo` / `TW` / `YLL` / `Thai` | — | **Indo workflow**: 一般處理；**1688 workflow**: SKIP-TAG（排除）|
+| `SKSP###`（例 `SKSP121`、`SKSP02`）| 共同採購供應商代碼 | **Indo workflow**: 忽略；**1688 workflow**: Phase 1 排除、Phase 2 合單 |
+| 其他（`150%` / `New0516` / `focallure` ...）| 一律忽略 | 通用 |
 
 **加總門檻判斷使用原值**（不放大後）：
-- 通過 `≥ 6` → 才進 NX 放大 → POST
-- 不過 `< 6` → 整單不建 + 記 `insufficient-quantity` 異常
+- 通過 `≥ 門檻` → 才進 NX 放大 → POST
+- 不過 `< 門檻` → 整單不建 + 記 `insufficient-quantity` 異常
+- Indo workflow 門檻 = 6；1688 workflow 門檻 = 3
+
+---
+
+## 1688 兩階段工作流程
+
+1688 一鍵採購會 **一個 child process 跑完兩個階段**：
+
+```mermaid
+flowchart TD
+    Start([1688 一鍵採購<br/>workflow=1688]) --> P1Search[Phase 1 廣泛搜尋<br/>keywordType=ALL  keyword=空]
+    P1Search --> P1Loop{遍歷候選商品}
+    P1Loop --> P1Tag{含 Indo/TW/YLL/Thai/SKSP*?}
+    P1Tag -->|是| P1Skip[SKIP-TAG<br/>留給 Phase 2 處理<br/>不算異常]
+    P1Tag -->|否| P1Rules[套商業規則<br/>STOP / NX / 加總≥3]
+    P1Rules --> P1Decide{decision?}
+    P1Decide -->|create| P1Post[POST add<br/>個別採購單]
+    P1Decide -->|skip-insufficient| P1Anom[記異常<br/>insufficient-quantity]
+    P1Skip --> P1Loop
+    P1Post --> P1Loop
+    P1Anom --> P1Loop
+    P1Loop -->|完| P2Search[Phase 2 SKSP 搜尋<br/>keyword=SKSP]
+    P2Search --> P2Decide[每商品 decideProduct<br/>threshold=0]
+    P2Decide --> P2Group[依 SKSP### 代碼分組]
+    P2Group --> P2Loop{遍歷每組}
+    P2Loop --> P2Sum{群組合計 rawSum ≥ 3?}
+    P2Sum -->|否| P2GAnom[記異常<br/>整組跳過]
+    P2Sum -->|是| P2Build[buildGroupAddPayload<br/>多商品合 itemView]
+    P2Build --> P2Post[POST add<br/>共同採購單<br/>多商品共用 1 張]
+    P2GAnom --> P2Loop
+    P2Post --> P2Loop
+    P2Loop -->|完| End([Summary + 異常匯出])
+
+    classDef anom fill:#f3eadb,stroke:#8b5a1d,color:#8b5a1d
+    classDef ok fill:#e4eee6,stroke:#2c6b3a,color:#2c6b3a
+    classDef p1 fill:#eaf3ee,stroke:#2d6a4f,color:#1d4a37
+    classDef p2 fill:#dfe9ff,stroke:#3056a8,color:#1f3a73
+    class P1Search,P1Tag,P1Rules,P1Decide,P1Post p1
+    class P2Search,P2Decide,P2Group,P2Loop,P2Sum,P2Build,P2Post p2
+    class P1Anom,P2GAnom anom
+    class End ok
+```
+
+### Phase 1 vs Phase 2 對照
+
+| 項目 | Phase 1（廣泛）| Phase 2（SKSP 共同採購）|
+|---|---|---|
+| 搜尋條件 | `keywordType=ALL` `keyword=空` | `keywordType=Keyword` `keyword=SKSP` |
+| 標籤排除 | `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` 全跳過 | 只排除 `Indo`/`TW`/`YLL`/`Thai`（保留 SKSP） |
+| 門檻 | 個別商品 `rawSum ≥ 3` | 個別商品 threshold=0；**群組合計 `≥ 3`** 才建單 |
+| 採購單粒度 | 一商品一張單 | 同 `SKSP###` 代碼的多商品 → **合成一張單** |
+| 異常記錄 | `insufficient-quantity` per-product | `insufficient-quantity` per-group（mainId=SKSP###）|
+
+### 為什麼要兩階段
+
+逐字稿「補充-共同採購.txt」：SKSP 標籤代表這些商品來自**同一個供應商**（例：SKSP121 = 同一個 1688 商家）。實務上要把同代碼的商品**合到同一張採購單**，員工才能跟廠商一次下單、一次收貨。
+
+- 沒有兩階段的話：每個 SKSP 商品個別建單 → 同廠商 6 個商品 = 6 張單，廠商 / 員工都要重複處理 6 次
+- 有兩階段：Phase 1 跳過所有 SKSP，Phase 2 統一合單 → 同廠商 1 張單
+
+### 單品查詢（`--only`）特殊處理
+
+分步執行透過 `--only KBT580` 鎖單一商品時，Phase 2 會**自動跳過**（單品查詢的語意不適用於批次合單）。
 
 ---
 
@@ -204,8 +277,9 @@ npm start
 啟動後訪問 `http://localhost:3001`，三個 tab：
 
 ### 01 智能採購建單（深綠色帶）
-- **分步執行**：輸入單一貨號 + 條件，分兩步「查商品/規則決策（SAFE）」「建立採購單（WARN）」
-- **一鍵完成**：搜尋條件 + 採購單參數 → 預覽（Dry-Run）/ 真執行（EXECUTE）
+- **Indo 一鍵採購**：搜尋 `Indo` 標籤商品 → 套規則（threshold=6）→ 個別建單
+- **1688 一鍵採購**：廣泛搜尋（threshold=3，排除 `Indo`/`TW`/`YLL`/`Thai`/`SKSP*`）+ Phase 2 SKSP 共同採購 — **一顆按鈕跑完兩階段**
+- **分步執行**（管理員）：輸入單一 MainId + 平台（Indo / 1688）→ 預覽 / 建單，1688 + 鎖單會跳過 Phase 2
 
 ### 02 異常紀錄
 - 紅色 badge 顯示總數
@@ -227,22 +301,31 @@ npm start
 ## CLI 用法
 
 ```bash
-# Dry-run（預設）
+# Indo dry-run（預設 workflow=indo）
 node purchase-create.js --keyword Indo --cardinality SalesCount30 --percent 150 \
                        --platform "indo-Office"
+
+# 1688 dry-run（兩階段：廣泛 + SKSP 共同採購）
+node purchase-create.js --workflow 1688 --cardinality SalesCount30 --percent 150 \
+                       --platform "1688-Office"
 
 # 真執行
 node purchase-create.js ... --execute
 
-# 鎖單測試（單一 MainId）
+# 鎖單測試（單一 MainId,Indo 模式）
 node purchase-create.js --keyword KBT580 --keyword-type ProductCode \
                        --cardinality SalesCount30 --percent 150 \
                        --platform "indo-Office" --only KBT580 --execute
 
+# 鎖單測試（單一 MainId,1688 模式 — Phase 2 自動跳過）
+node purchase-create.js --workflow 1688 --keyword KBT348 --keyword-type ProductCode \
+                       --cardinality SalesCount15 --percent 100 \
+                       --platform "1688-Office" --only KBT348
+
 # 只跑前 N 筆（測試用）
 node purchase-create.js ... --max-products 5
 
-# 加總門檻（預設 6）
+# 加總門檻（Indo 預設 6;1688 強制 3,參數會被 workflow 蓋過）
 node purchase-create.js ... --threshold 6
 
 # Debug 顯示瀏覽器
@@ -253,14 +336,15 @@ node purchase-create.js ... --headed --debug
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `--keyword` | (空) | 搜尋關鍵字 |
+| `--workflow` | `indo` | `indo` / `1688` — 1688 走兩階段（含 SKSP 共同採購）|
+| `--keyword` | (空) | 搜尋關鍵字（1688 workflow Phase 1 會忽略，固定用 ALL）|
 | `--keyword-type` | `Keyword` | `Keyword` / `ProductName` / `ProductCode` / `ALL` |
 | `--cardinality` | `SalesCount15` | 需求算式：`SafetyStock` / `SalesCount7` / `15` / `30` / `60` / `90` |
 | `--percent` | `100` | 倍率 % |
 | `--supplier` | (空) | 供應商 GUID（可空 = 全部） |
-| `--platform` | (空) | 採購平台，例如 `indo-Office` |
-| `--threshold` | `6` | 加總門檻，`< threshold` 不建單 |
-| `--only` | (空) | 只跑指定 MainId，逗號分隔 |
+| `--platform` | (空) | 採購平台，例如 `indo-Office` / `1688-Office` |
+| `--threshold` | `6` | Indo 加總門檻；1688 workflow 強制使用 3 |
+| `--only` | (空) | 只跑指定 MainId，逗號分隔（1688 + only 會跳過 Phase 2）|
 | `--max-products` | `0` | 0 = 無上限 |
 | `--execute` | false | 真的 POST add |
 | `--debug` | false | 印完整 payload |

@@ -1,90 +1,91 @@
-# 智能採購控制台 — One-click Launcher
-# Starts server and opens Chrome browser
-# Close this window to stop the server
+# Smart Purchase Console - Hidden Launcher
+# After clicking the start shortcut, node runs detached in background.
+# Browser opens automatically. This script exits immediately.
+# Staff cannot accidentally kill the server (no console window visible).
+# Server stdout -> state\server.log, stderr -> state\server.err.log
+# To stop the server, run stop.bat.
+#
+# This file uses ASCII-only comments and messages so that PowerShell 5.1
+# can parse it regardless of file BOM / system code page.
 
-$ErrorActionPreference = 'Stop'
-$OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
+$ErrorActionPreference = 'SilentlyContinue'
 Set-Location -Path $PSScriptRoot
-$Host.UI.RawUI.WindowTitle = "Purchase Console (3001)"
 
-Clear-Host
-Write-Host ""
-Write-Host "  ===============================================" -ForegroundColor Green
-Write-Host "    智能採購控制台 - Launcher" -ForegroundColor Green
-Write-Host "  ===============================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "   URL : http://localhost:3001"
-Write-Host "   Dir : $PSScriptRoot"
-Write-Host ""
+function Show-ErrorDialog($message) {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show($message, 'Purchase Console - Startup Failed', 'OK', 'Error') | Out-Null
+}
 
-# Node.js check
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) {
-    Write-Host "  [ERROR] Node.js not found in PATH" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
+# --- Node.js check ---
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Show-ErrorDialog "Node.js not found in PATH.`r`nPlease install Node.js and try again."
     exit 1
 }
 
-# server.js check
-if (-not (Test-Path "server.js")) {
-    Write-Host "  [ERROR] server.js not found" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
+# --- server.js check ---
+if (-not (Test-Path "$PSScriptRoot\server.js")) {
+    Show-ErrorDialog "server.js not found at:`r`n$PSScriptRoot\server.js"
     exit 1
 }
 
-# Detect Chrome
+# --- Detect Chrome (any of these standard install paths) ---
 $chromeCandidates = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
     "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
 )
 $chrome = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($chrome) {
-    Write-Host "   Chrome: $chrome" -ForegroundColor DarkGray
-} else {
-    Write-Host "   Chrome: not detected, using default browser" -ForegroundColor Yellow
+
+# --- Check if port 3001 is already in use (server already running) ---
+function Test-PortListening([int]$port) {
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $iar = $tcp.BeginConnect('127.0.0.1', $port, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne(200, $false)
+        if ($ok) { try { $tcp.EndConnect($iar) } catch {}; $tcp.Close(); return $true }
+        $tcp.Close()
+        return $false
+    } catch { return $false }
 }
-Write-Host ""
 
-# Port 3001 check
-$portInUse = $false
-try {
-    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 3001)
-    $listener.Start()
-    $listener.Stop()
-} catch { $portInUse = $true }
+$alreadyRunning = Test-PortListening 3001
 
-if ($portInUse) {
-    Write-Host "  [INFO] Port 3001 already in use, opening browser only." -ForegroundColor Yellow
-    if ($chrome) {
-        Start-Process -FilePath $chrome -ArgumentList '--new-window', 'http://localhost:3001'
-    } else {
-        Start-Process 'http://localhost:3001'
+if (-not $alreadyRunning) {
+    # Ensure state\ exists for log files
+    $stateDir = Join-Path $PSScriptRoot 'state'
+    if (-not (Test-Path $stateDir)) {
+        New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
     }
-    Read-Host "Press Enter to close"
-    exit 0
+    $logOut = Join-Path $stateDir 'server.log'
+    $logErr = Join-Path $stateDir 'server.err.log'
+
+    # Launch node detached + hidden. Wrap with cmd /c so the shell handles
+    # stdout/stderr redirect itself -- PowerShell's -RedirectStandardOutput is
+    # unreliable when the host PowerShell is launched with -WindowStyle Hidden.
+    $cmdLine = "/c node.exe server.js > `"$logOut`" 2> `"$logErr`""
+    Start-Process -FilePath 'cmd.exe' `
+        -ArgumentList $cmdLine `
+        -WorkingDirectory $PSScriptRoot `
+        -WindowStyle Hidden | Out-Null
+
+    # Poll port until server listens (max 10s, every 200ms)
+    $up = $false
+    for ($i = 0; $i -lt 50; $i++) {
+        Start-Sleep -Milliseconds 200
+        if (Test-PortListening 3001) { $up = $true; break }
+    }
+    if (-not $up) {
+        Show-ErrorDialog "Server did not respond on port 3001 within 10s.`r`nCheck state\server.log and state\server.err.log for details."
+        exit 1
+    }
 }
 
-Write-Host "   * Close this window to stop the server" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  -----------------------------------------------" -ForegroundColor DarkGray
-Write-Host ""
-
-# Background: open Chrome after 3s
-$openBrowserScript = if ($chrome) {
-    "Start-Sleep 3; Start-Process -FilePath '$chrome' -ArgumentList '--new-window','http://localhost:3001'"
+# --- Open browser ---
+if ($chrome) {
+    Start-Process -FilePath $chrome -ArgumentList '--new-window', 'http://localhost:3001'
 } else {
-    "Start-Sleep 3; Start-Process 'http://localhost:3001'"
+    Start-Process 'http://localhost:3001'
 }
-Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', $openBrowserScript
 
-try {
-    & node server.js
-} finally {
-    Write-Host ""
-    Write-Host "  -----------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  Server stopped" -ForegroundColor Yellow
-    Read-Host "Press Enter to close"
-}
+# Exit -- node keeps running in background
+exit 0

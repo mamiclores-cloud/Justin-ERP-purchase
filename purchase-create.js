@@ -27,8 +27,10 @@ const { createClient } = require('./lib/http-client');
 const {
   decideProduct,
   buildAddPayload,
+  buildGroupAddPayload,
   CARDINALITY_OPTIONS,
   getSpecLabel,
+  getSkspCode,
 } = require('./lib/purchase-rules');
 
 function ts() { return new Date().toISOString().slice(11, 19); }
@@ -95,15 +97,18 @@ function parseArgs() {
     headed:      args.includes('--headed'),
     debug:       args.includes('--debug'),
 
+    // 工作流程
+    workflow:    get('--workflow', 'indo'),               // 'indo' | '1688'
+
     // 搜尋條件
     keyword:     get('--keyword', ''),
-    keywordType: get('--keyword-type', 'Keyword'),       // Keyword | ProductName | ProductCode
+    keywordType: get('--keyword-type', 'Keyword'),        // Keyword | ProductName | ProductCode | ALL
     supplier:    get('--supplier', ''),                   // SupplierGUID（可空）
     cardinality: get('--cardinality', 'SalesCount15'),    // 對應需求算式
     percent:     parseInt(get('--percent', '100'), 10) || 100,
 
     // 採購單參數
-    platform:    get('--platform', ''),                   // 採購平台，例 "indo-Office"
+    platform:    get('--platform', ''),                   // 採購平台，例 "indo-Office" / "1688-Office"
 
     // 行為控制
     only:        get('--only'),                           // 逗號分隔 MainId 清單
@@ -115,8 +120,10 @@ function parseArgs() {
 
 function printHeader(opts) {
   const card = CARDINALITY_OPTIONS.find((c) => c.value === opts.cardinality);
+  const effectiveThreshold = opts.workflow === '1688' ? 3 : opts.threshold;
   log(`=================================================`);
   log(`  智能採購批次建單 — ${opts.execute ? 'EXECUTE' : 'DRY-RUN'}`);
+  log(`  workflow:    ${opts.workflow || 'indo'}`);
   log(`=================================================`);
   log(`  搜尋條件:`);
   log(`    keywordType: ${opts.keywordType}`);
@@ -126,7 +133,7 @@ function printHeader(opts) {
   log(`    percent:     ${opts.percent}%`);
   log(`  採購單:`);
   log(`    platform:    ${opts.platform || '(空)'}`);
-  log(`    threshold:   加總 >= ${opts.threshold} 才建單`);
+  log(`    threshold:   加總 >= ${effectiveThreshold} 才建單`);
   if (opts.only)        log(`    only:        ${opts.only}`);
   if (opts.maxProducts) log(`    maxProducts: ${opts.maxProducts}`);
   log('');
@@ -135,9 +142,10 @@ function printHeader(opts) {
 function formatDecision(d) {
   const lines = [];
   const decisionLabel = {
-    'create': '[CREATE]',
-    'skip-insufficient': '[SKIP-INSUFFICIENT]',
-    'skip-no-needpurchase': '[SKIP-NO-NEED]',
+    'create':                '[CREATE]',
+    'skip-insufficient':     '[SKIP-INSUFFICIENT]',
+    'skip-no-needpurchase':  '[SKIP-NO-NEED]',
+    'skip-tag-excluded':     '[SKIP-TAG]',
   }[d.decision] || '[UNKNOWN]';
 
   lines.push(`${decisionLabel}  ${d.mainId}  ${d.productName ? '— ' + d.productName.slice(0, 50) : ''}`);
@@ -166,44 +174,22 @@ function formatDecision(d) {
   return lines.join('\n');
 }
 
-(async () => {
-  const opts = parseArgs();
-  printHeader(opts);
+/* ============ 共用：搜尋 + 決策 + POST 單商品單（Indo / 1688 phase1 用）============ */
 
-  if (opts.execute && !opts.platform) {
-    log('!!! --execute 模式必須提供 --platform（採購平台，例 "indo-Office"）');
-    process.exit(1);
-  }
-
-  const onlySet = opts.only ? new Set(opts.only.split(',').map((s) => s.trim()).filter(Boolean)) : null;
-
-  const { context } = await launchWithSession({ headless: !opts.headed });
-  const api = createClient(context);
-
-  /* ============ Step 1: GetIntelligentList ============ */
-  log(`=== Step 1: GET /api/ProductOverview/ProductSpecList ===`);
+async function fetchAndDecide(api, fetchParams, decideOpts, opts) {
   const res = await api.Purchase.intelligentList({
     length: 999,
-    KeywordType: opts.keywordType,
-    Keyword: opts.keyword,
-    supplier: opts.supplier,
+    KeywordType: fetchParams.keywordType || 'Keyword',
+    Keyword: fetchParams.keyword || '',
+    supplier: opts.supplier || '',
     cardinality: opts.cardinality,
     percent: opts.percent,
   });
-
   const products = res.list || [];
   const total = res.recordsTotal ?? res.recordsFiltered ?? products.length;
   log(`  fetched ${products.length} products  (recordsTotal=${total})`);
 
-  if (products.length === 0) {
-    log('  沒有候選商品 — 結束');
-    await context.close();
-    return;
-  }
-
-  /* ============ Step 2: Decide per product ============ */
-  log(`\n=== Step 2: 規則決策 ===\n`);
-
+  const onlySet = opts.only ? new Set(opts.only.split(',').map((s) => s.trim()).filter(Boolean)) : null;
   const decisions = [];
   let scanned = 0;
   for (const p of products) {
@@ -211,94 +197,83 @@ function formatDecision(d) {
     if (onlySet && !onlySet.has(mainId)) continue;
     if (opts.maxProducts > 0 && scanned >= opts.maxProducts) break;
     scanned++;
-
-    const d = decideProduct(p.product, p.productSpc, { threshold: opts.threshold });
+    const d = decideProduct(p.product, p.productSpc, decideOpts);
     decisions.push(d);
     console.log(formatDecision(d));
     console.log('');
-
-    // 即時 append 異常到檔（dry-run 也寫，方便測試規則是否正確；mode 欄位區分）
     try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run', opts); }
     catch (e) { log(`  (warn) anomaly log append failed: ${e.message}`); }
   }
+  log(`  scanned=${scanned}`);
+  return decisions;
+}
 
-  /* ============ Step 3: POST add (or dry-run) ============ */
-  const toCreate = decisions.filter((d) => d.decision === 'create');
-  log(`\n=== Step 3: ${opts.execute ? 'POST PurchaseSheet/add' : 'DRY-RUN'} (${toCreate.length} 張單) ===\n`);
-
+async function postDecisions(toCreate, opts, api, labelPrefix) {
   const results = [];
   for (let i = 0; i < toCreate.length; i++) {
     const d = toCreate[i];
     const payload = buildAddPayload(d, { platform: opts.platform });
-
     if (!opts.execute) {
-      log(`  [DRY-RUN ${i + 1}/${toCreate.length}] ${d.mainId}  (itemView ${payload.itemView.length} 規格, platform="${payload.PurchasePlatform}")`);
-      if (opts.debug) {
-        console.log('    payload:', JSON.stringify(payload, null, 2));
-      }
+      log(`  [DRY-RUN ${labelPrefix}${i + 1}/${toCreate.length}] ${d.mainId}  (規格 ${payload.itemView.length})`);
+      if (opts.debug) console.log('    payload:', JSON.stringify(payload, null, 2));
       results.push({ mainId: d.mainId, status: 'dry-run' });
       continue;
     }
-
-    log(`  [${i + 1}/${toCreate.length}] POST add — ${d.mainId}  (規格 ${payload.itemView.length}, platform="${payload.PurchasePlatform}")`);
+    log(`  [${labelPrefix}${i + 1}/${toCreate.length}] POST — ${d.mainId}  (規格 ${payload.itemView.length})`);
     try {
       const resAdd = await api.Purchase.add(payload);
       const ok = resAdd?.Status === 'Success';
       if (ok) {
         const guid = resAdd.PurchaseSheetGUID || resAdd.GUID || resAdd.guid || '(no guid)';
-        log(`    ✓ Success  PurchaseSheetGUID=${guid}`);
-        results.push({ mainId: d.mainId, status: 'ok', guid, response: resAdd });
+        log(`    ✓ Success  GUID=${guid}`);
+        results.push({ mainId: d.mainId, status: 'ok', guid });
       } else {
-        log(`    !!! Status=${resAdd?.Status}  ErrorMessage=${(resAdd?.ErrorMessage || '').slice(0, 200)}`);
+        log(`    !!! Status=${resAdd?.Status}  Err=${(resAdd?.ErrorMessage || '').slice(0, 200)}`);
         results.push({ mainId: d.mainId, status: 'fail', response: resAdd });
-        // 系統層的 POST 失敗 — 不寫員工異常紀錄（屬於系統訊息，只在 log 印出）
       }
     } catch (e) {
       log(`    !!! API error: ${e.message.slice(0, 200)}`);
       results.push({ mainId: d.mainId, status: 'error', error: e.message });
-      // 系統層的 API error — 不寫員工異常紀錄
     }
     if (opts.pauseMs > 0 && i < toCreate.length - 1) await sleep(opts.pauseMs);
   }
+  return results;
+}
 
-  /* ============ Step 4: Summary + 異常清單 ============ */
-  log(`\n=== Summary ===`);
-
+function printSummary(decisions, results, opts) {
   const byDecision = {
-    'create':                decisions.filter((d) => d.decision === 'create').length,
-    'skip-insufficient':     decisions.filter((d) => d.decision === 'skip-insufficient').length,
-    'skip-no-needpurchase':  decisions.filter((d) => d.decision === 'skip-no-needpurchase').length,
+    'create':             decisions.filter((d) => d.decision === 'create').length,
+    'skip-insufficient':  decisions.filter((d) => d.decision === 'skip-insufficient').length,
+    'skip-no-needpurchase': decisions.filter((d) => d.decision === 'skip-no-needpurchase').length,
+    'skip-tag-excluded':  decisions.filter((d) => d.decision === 'skip-tag-excluded').length,
   };
-  log(`  Scanned products:     ${scanned}`);
   log(`  CREATE decisions:     ${byDecision['create']}`);
   log(`  SKIP (數量不足):       ${byDecision['skip-insufficient']}`);
   log(`  SKIP (無建議量):       ${byDecision['skip-no-needpurchase']}`);
+  if (byDecision['skip-tag-excluded']) log(`  SKIP (標籤排除):       ${byDecision['skip-tag-excluded']}`);
 
-  if (opts.execute) {
-    const ok = results.filter((r) => r.status === 'ok').length;
-    const fail = results.filter((r) => r.status === 'fail' || r.status === 'error').length;
-    log(`  POST 成功:            ${ok}`);
-    log(`  POST 失敗:            ${fail}`);
+  if (opts.execute && results) {
+    log(`  POST 成功:            ${results.filter((r) => r.status === 'ok').length}`);
+    log(`  POST 失敗:            ${results.filter((r) => r.status === 'fail' || r.status === 'error').length}`);
   }
 
-  /* ============ 異常清單 ============ */
-  const anomalies = decisions.flatMap((d) => d.anomalies);
+  const anomalies = decisions.flatMap((d) => d.anomalies).filter((a) => a.type !== 'tag-excluded');
   if (anomalies.length > 0) {
     log(`\n=== 異常回報 (${anomalies.length}) ===`);
-    const byType = anomalies.reduce((a, x) => { (a[x.type] = a[x.type] || []).push(x); return a; }, {});
+    const byType = anomalies.reduce((acc, x) => { (acc[x.type] = acc[x.type] || []).push(x); return acc; }, {});
     if (byType['insufficient-quantity']) {
       log(`\n  ⚠ 數量不足 (${byType['insufficient-quantity'].length})`);
       byType['insufficient-quantity'].forEach((a) => log(`     - ${a.message}`));
     }
     if (byType['stop-spec-skipped']) {
-      log(`\n  ⚠ STOP 故沒訂購（規格） (${byType['stop-spec-skipped'].length})`);
+      log(`\n  ⚠ STOP 故沒訂購 (${byType['stop-spec-skipped'].length})`);
       byType['stop-spec-skipped'].forEach((a) => log(`     - ${a.message}`));
     }
   } else {
     log(`\n  (無異常)`);
   }
 
-  if (opts.execute) {
+  if (opts.execute && results) {
     const failed = results.filter((r) => r.status === 'fail' || r.status === 'error');
     if (failed.length > 0) {
       log(`\n=== POST 失敗詳情 ===`);
@@ -309,8 +284,204 @@ function formatDecision(d) {
       });
     }
   }
+}
 
-  await context.close();
+/* ============ Indo 工作流程（原邏輯不變） ============ */
+
+async function runIndo(opts, api) {
+  log(`=== [Indo] Step 1: GET ProductSpecList ===`);
+  const decisions = await fetchAndDecide(
+    api,
+    { keywordType: opts.keywordType, keyword: opts.keyword },
+    { threshold: opts.threshold },
+    opts,
+  );
+  if (decisions.length === 0) { log('  沒有候選商品'); return; }
+
+  const toCreate = decisions.filter((d) => d.decision === 'create');
+  log(`\n=== [Indo] Step 2: ${opts.execute ? 'POST' : 'DRY-RUN'} (${toCreate.length} 張單) ===\n`);
+  const results = await postDecisions(toCreate, opts, api, '');
+  log(`\n=== Summary ===`);
+  printSummary(decisions, results, opts);
+}
+
+/* ============ 1688 工作流程：兩階段 ============ */
+
+// Phase 1 不訂購標籤清單（SKSP 也跳過，留給 phase 2 共同採購）
+const EXCLUDE_1688 = ['Indo', 'TW', 'YLL', 'Thai', 'SKSP'];
+// Phase 2 只搜 SKSP，SKSP 自身不排除
+const EXCLUDE_SKSP = ['Indo', 'TW', 'YLL', 'Thai'];
+const THRESHOLD_1688 = 3;
+
+async function run1688(opts, api) {
+  const mode = opts.execute ? 'EXECUTE' : 'DRY-RUN';
+  const allDecisions = [];
+  let totalResults = [];
+
+  /* ── Phase 1：廣泛搜尋（一般 1688 商品） ── */
+  log(`\n${'='.repeat(60)}`);
+  log(`=== [1688 Phase 1] 廣泛搜尋一般商品 (threshold ≥ ${THRESHOLD_1688}) ===`);
+  log(`${'='.repeat(60)}\n`);
+
+  const p1decisions = await fetchAndDecide(
+    api,
+    { keywordType: 'ALL', keyword: '' },
+    { threshold: THRESHOLD_1688, excludeTags: EXCLUDE_1688 },
+    opts,
+  );
+  allDecisions.push(...p1decisions);
+
+  const p1create = p1decisions.filter((d) => d.decision === 'create');
+  log(`\n=== [1688 Phase 1] ${mode} 個別商品採購單 (${p1create.length} 張) ===\n`);
+  const p1results = await postDecisions(p1create, opts, api, 'P1-');
+  totalResults.push(...p1results);
+
+  /* ── Phase 2：SKSP 共同採購（單品查詢模式跳過）── */
+  if (opts.only) {
+    log(`\n[1688] --only 已設定，跳過 Phase 2 SKSP 合單（單品查詢模式）`);
+    log(`\n${'='.repeat(60)}`);
+    log(`=== [1688] 總結 ===`);
+    log(`${'='.repeat(60)}`);
+    printSummary(allDecisions, totalResults, opts);
+    return;
+  }
+
+  log(`\n${'='.repeat(60)}`);
+  log(`=== [1688 Phase 2] SKSP 共同採購 (threshold ≥ ${THRESHOLD_1688}) ===`);
+  log(`${'='.repeat(60)}\n`);
+
+  const skspRes = await api.Purchase.intelligentList({
+    length: 999,
+    KeywordType: 'Keyword',
+    Keyword: 'SKSP',
+    supplier: opts.supplier || '',
+    cardinality: opts.cardinality,
+    percent: opts.percent,
+  });
+  const skspProducts = skspRes.list || [];
+  log(`  fetched ${skspProducts.length} SKSP products`);
+
+  // 對每個 SKSP 商品決策（threshold=0，門檻判斷在合單層）
+  const skspDecisions = [];
+  for (const p of skspProducts) {
+    const d = decideProduct(p.product, p.productSpc, {
+      threshold: 0,
+      excludeTags: EXCLUDE_SKSP,
+    });
+    skspDecisions.push(d);
+    if (d.decision === 'create' || d.decision === 'skip-no-needpurchase') {
+      console.log(formatDecision(d));
+      console.log('');
+    }
+    try { appendAnomalies(d, opts.execute ? 'execute' : 'dry-run', opts); }
+    catch (e) { log(`  (warn) anomaly log append failed: ${e.message}`); }
+  }
+  allDecisions.push(...skspDecisions);
+
+  // 依 SKSP 代碼分組（只取 create 決策）
+  const skspGroups = {};
+  for (const d of skspDecisions) {
+    if (d.decision !== 'create') continue;
+    const code = getSkspCode(d.tags);
+    if (!code) continue;  // 無 SKSPxxx 代碼就跳過（不合單）
+    if (!skspGroups[code]) skspGroups[code] = [];
+    skspGroups[code].push(d);
+  }
+
+  const groupCodes = Object.keys(skspGroups);
+  log(`\n  SKSP 分組數量：${groupCodes.length} 組`);
+
+  // 對每組做合單門檻判斷 + POST
+  let groupIdx = 0;
+  for (const code of groupCodes) {
+    groupIdx++;
+    const groupDecisions = skspGroups[code];
+    const groupRawSum = groupDecisions.reduce((s, d) => s + d.rawSum, 0);
+    const groupMainIds = groupDecisions.map((d) => d.mainId).join(', ');
+    const groupSpecCount = groupDecisions.reduce((s, d) => s + d.items.length, 0);
+
+    log(`\n  [群組 ${groupIdx}/${groupCodes.length}] ${code}  商品: ${groupMainIds}`);
+    log(`    合計 rawSum=${groupRawSum}  規格數=${groupSpecCount}`);
+
+    if (groupRawSum < THRESHOLD_1688) {
+      log(`    ⚠ 合計 ${groupRawSum} < ${THRESHOLD_1688}，整組不建單`);
+      // 記 insufficient-quantity 異常（per-group）
+      const groupAnomaly = {
+        type: 'insufficient-quantity',
+        mainId: code,
+        productName: `共同採購 ${code} (${groupMainIds})`,
+        rawSum: groupRawSum,
+        threshold: THRESHOLD_1688,
+        message: `${code} 共同採購合計 ${groupRawSum} < ${THRESHOLD_1688}，整組跳過`,
+        specs: groupDecisions.flatMap((d) => d.items.map((it) => ({ label: it.label, qty: it.origQty }))),
+      };
+      const fakeDecision = {
+        mainId: code, productName: groupAnomaly.productName, tags: { all: [] },
+        decision: 'skip-insufficient', anomalies: [groupAnomaly],
+      };
+      try { appendAnomalies(fakeDecision, opts.execute ? 'execute' : 'dry-run', opts); }
+      catch (e) { log(`  (warn) anomaly log failed: ${e.message}`); }
+      allDecisions.push(fakeDecision);   // 讓 printSummary 數得到此筆群組異常
+      continue;
+    }
+
+    const payload = buildGroupAddPayload(groupDecisions, { platform: opts.platform });
+    if (!opts.execute) {
+      log(`    [DRY-RUN P2-${groupIdx}] ${code}  (itemView ${payload.itemView.length} 規格)`);
+      if (opts.debug) console.log('    payload:', JSON.stringify(payload, null, 2));
+      totalResults.push({ mainId: code, status: 'dry-run' });
+      continue;
+    }
+
+    log(`    [P2-${groupIdx}/${groupCodes.length}] POST — ${code}  (規格 ${payload.itemView.length})`);
+    try {
+      const resAdd = await api.Purchase.add(payload);
+      const ok = resAdd?.Status === 'Success';
+      if (ok) {
+        const guid = resAdd.PurchaseSheetGUID || resAdd.GUID || resAdd.guid || '(no guid)';
+        log(`    ✓ Success  GUID=${guid}`);
+        totalResults.push({ mainId: code, status: 'ok', guid });
+      } else {
+        log(`    !!! Status=${resAdd?.Status}  Err=${(resAdd?.ErrorMessage || '').slice(0, 200)}`);
+        totalResults.push({ mainId: code, status: 'fail', response: resAdd });
+      }
+    } catch (e) {
+      log(`    !!! API error: ${e.message.slice(0, 200)}`);
+      totalResults.push({ mainId: code, status: 'error', error: e.message });
+    }
+    if (opts.pauseMs > 0) await sleep(opts.pauseMs);
+  }
+
+  /* ── 總結 ── */
+  log(`\n${'='.repeat(60)}`);
+  log(`=== [1688] 總結 ===`);
+  log(`${'='.repeat(60)}`);
+  printSummary(allDecisions, totalResults, opts);
+}
+
+/* ============ 入口 ============ */
+
+(async () => {
+  const opts = parseArgs();
+  printHeader(opts);
+
+  if (opts.execute && !opts.platform) {
+    log('!!! --execute 模式必須提供 --platform（採購平台，例 "indo-Office" / "1688-Office"）');
+    process.exit(1);
+  }
+
+  const { context } = await launchWithSession({ headless: !opts.headed });
+  const api = createClient(context);
+
+  try {
+    if (opts.workflow === '1688') {
+      await run1688(opts, api);
+    } else {
+      await runIndo(opts, api);
+    }
+  } finally {
+    await context.close();
+  }
   log(`\ndone`);
 })().catch((e) => {
   console.error('[FATAL]', e.message);

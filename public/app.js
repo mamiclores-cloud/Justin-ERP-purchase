@@ -1,13 +1,11 @@
-// app.js — 智能採購控制台前端
+// app.js — 智能採購控制台前端 (新 UI + 後端整合)
 (() => {
   'use strict';
 
-  let activeJobId = null;
-  let pollTimer = null;
+  /* ============== Helpers ============== */
+  const $  = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  /* ========== DOM helpers ========== */
-  function $(sel, parent = document) { return parent.querySelector(sel); }
-  function $$(sel, parent = document) { return Array.from(parent.querySelectorAll(sel)); }
   function el(tag, props = {}, children = []) {
     const e = document.createElement(tag);
     Object.entries(props).forEach(([k, v]) => {
@@ -15,164 +13,256 @@
       else if (k === 'dataset') Object.assign(e.dataset, v);
       else if (k === 'style') Object.assign(e.style, v);
       else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
-      else e.setAttribute(k, v);
+      else if (v === true) e.setAttribute(k, '');
+      else if (v !== false && v !== null && v !== undefined) e.setAttribute(k, v);
     });
     if (typeof children === 'string') e.textContent = children;
-    else if (Array.isArray(children)) children.forEach((c) => c && e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+    else if (Array.isArray(children)) children.forEach(c => c && e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
     return e;
   }
-  function classifyLogLine(text) {
-    if (/\[CREATE\]/.test(text)) return 'log-line--create';
-    if (/\[SKIP/.test(text))     return 'log-line--skip';
-    if (/✓|Success|completed|done$/i.test(text)) return 'log-line--success';
-    if (/⚠|WARN/.test(text))    return 'log-line--warn';
-    if (/\bERROR\b|\bFATAL\b|!!!/i.test(text)) return 'log-line--stderr';
+
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // log line 染色 (inline style,不動 style.css)
+  const LOG_COLOR = {
+    stderr:  '#e89a9a',
+    success: '#94c79c',
+    warn:    '#d8b573',
+    create:  '#88c7a3',
+    skip:    '#b8b8a8',
+  };
+  function classifyLog(text) {
+    if (/\[CREATE\]/.test(text))                return 'create';
+    if (/\[SKIP/.test(text))                    return 'skip';
+    if (/✓|Success|completed|done$/i.test(text)) return 'success';
+    if (/⚠|WARN/.test(text))                    return 'warn';
+    if (/\bERROR\b|\bFATAL\b|!!!/i.test(text))  return 'stderr';
     return '';
   }
 
-  /* ========== Tab 切換 ========== */
-  $$('.tabs--top .tab').forEach((t) => {
-    t.addEventListener('click', () => {
-      const target = t.dataset.tab;
-      $$('.tabs--top .tab').forEach((x) => x.classList.toggle('is-active', x === t));
-      $$('.tab-panel').forEach((p) => p.classList.toggle('is-active', p.id === 'tab-' + target));
-      if (target === 'schedule')  loadSchedules();
-      if (target === 'anomalies') { loadAnomalies(); startAnomalyPoll(); }
-      else stopAnomalyPoll();
-    });
-  });
-
-  /* ========== Sub-tab 切換（智能採購內部）========== */
-  $$('.tabs--sub .tab').forEach((t) => {
-    t.addEventListener('click', () => {
-      const target = t.dataset.subtab;
-      if (!target) return;
-      const group = t.parentElement;
-      $$('.tab', group).forEach((x) => x.classList.toggle('is-active', x === t));
-      const panelParent = group.parentElement;
-      $$('.sub-panel', panelParent).forEach((p) => p.classList.toggle('is-active', p.id === 'subtab-' + target));
-    });
-  });
-
-  /* ========== 採購平台組字串預覽（一鍵完成）========== */
-  function updatePlatformPreview() {
-    const prefix = $('#platformPrefix').value || '';
-    const dest = $('#platformDest').value || '';
-    $('#platformPreview').value = prefix + dest;
+  /* ============== Admin defaults (localStorage) ============== */
+  const ADMIN_KEY = 'admin-defaults-v1';
+  const ADMIN_MODE_KEY = 'admin-mode-v1';
+  const DEFAULTS = {
+    cardinality: 'SalesCount90',
+    percent: 150,
+    prefix: 'indo-',
+    dest: 'Office',
+  };
+  function loadAdminDefaults() {
+    try {
+      const raw = localStorage.getItem(ADMIN_KEY);
+      if (!raw) return { ...DEFAULTS };
+      return { ...DEFAULTS, ...JSON.parse(raw) };
+    } catch { return { ...DEFAULTS }; }
   }
-  $('#platformPrefix').addEventListener('input', updatePlatformPreview);
-  $('#platformDest').addEventListener('input', updatePlatformPreview);
-  updatePlatformPreview();
-
-  /* ========== 採購平台組字串預覽（分步執行）========== */
-  function updateStepPlatformPreview() {
-    const prefix = $('#stepPlatformPrefix').value || '';
-    const dest = $('#stepPlatformDest').value || '';
-    $('#stepPlatformPreview').value = prefix + dest;
+  function saveAdminDefaults(d) {
+    try { localStorage.setItem(ADMIN_KEY, JSON.stringify(d)); } catch {}
   }
-  $('#stepPlatformPrefix').addEventListener('input', updateStepPlatformPreview);
-  $('#stepPlatformDest').addEventListener('input', updateStepPlatformPreview);
-  updateStepPlatformPreview();
+  function applyAdminDefaultsToForms() {
+    const d = loadAdminDefaults();
+    $('#adminCardinality').value     = d.cardinality;
+    $('#adminPercent').value         = d.percent;
+    $('#adminPlatformPrefix').value  = d.prefix;
+    $('#adminPlatformDest').value    = d.dest;
 
-  /* ========== 通用 view（一鍵 vs 分步共用 run 邏輯）========== */
+    $('#indoCardinality').value     = d.cardinality;
+    $('#indoPercent').value         = d.percent;
+    $('#indoPlatformPrefix').value  = d.prefix;
+    $('#indoPlatformDest').value    = d.dest;
 
-  function makeOneClickView() {
-    return {
-      name: 'oneclick',
-      statusPill: $('#runStatus'),
-      logPanel:   $('#logPanel'),
-      logSummary: $('#logSummary'),
-      buttons: [$('#btnDryRun'), $('#btnExecute')],
-      stopBtn: $('#btnStop'),
-    };
+    $('#t1688Cardinality').value    = d.cardinality;
+    $('#t1688Percent').value        = d.percent;
+    $('#t1688PlatformDest').value   = d.dest;
   }
 
-  function makeStepView(stepCard) {
-    return {
-      name: 'step:' + stepCard.dataset.stepId,
-      statusPill: $('[data-role="status"]', stepCard),
-      statusLabel: $('[data-role="status-label"]', stepCard),
-      logPanel:   $('[data-role="log"]', stepCard),
-      logSummary: null,
-      buttons: $$('[data-step-action]', stepCard).filter((b) => b.dataset.stepAction !== 'stop'),
-      stopBtn: $('[data-step-action="stop"]', stepCard),
-    };
+  /* ============== Tab navigation ============== */
+  const tabs    = $$('.tab');
+  const panels  = $$('.tabpanel');
+  const tabsNav = $('#tabsNav');
+
+  function showPanelOnly(panelId) {
+    panels.forEach(p => p.classList.toggle('is-active', p.id === panelId));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  function setViewStatus(view, state, label) {
-    const pill = view.statusPill;
-    if (!pill) return;
-    pill.className = 'status status--' + state;
-    if (view.statusLabel) {
-      view.statusLabel.textContent = label;
+  function switchTab(name) {
+    tabs.forEach(t => t.classList.toggle('is-active', t.dataset.tab === name));
+    showPanelOnly(`tab-${name}`);
+
+    if (name === 'exception') {
+      loadAnomalies();
+      startAnomalyPoll();
     } else {
-      pill.innerHTML = `<span class="status__dot"></span>${label}`;
+      stopAnomalyPoll();
     }
+    if (name === 'schedule') loadSchedules();
   }
 
-  function appendLogTo(view, logs) {
-    if (!logs || !logs.length) return;
-    const log = view.logPanel;
-    const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
-    logs.forEach((l) => {
-      const cls = 'log-line' + (l.stream === 'stderr' ? ' log-line--stderr' : ' ' + classifyLogLine(l.text));
-      log.appendChild(el('div', { class: cls }, l.text));
+  tabs.forEach(t => t.addEventListener('click', () => {
+    if (adminOn) setAdmin(false);
+    tabsNav.hidden = false;
+    switchTab(t.dataset.tab);
+  }));
+
+  /* ============== Admin mode toggle ============== */
+  const adminBtn   = $('#adminToggle');
+  const adminLabel = $('#adminToggleLabel');
+  let adminOn = false;
+
+  function setAdmin(on) {
+    if (adminOn === on) return;
+    adminOn = on;
+    adminBtn.classList.toggle('is-on', on);
+    adminLabel.textContent = on ? '退出管理員' : '管理員';
+    tabsNav.hidden = on;
+    if (on) {
+      tabs.forEach(t => t.classList.remove('is-active'));
+      showPanelOnly('adminView');
+      stopAnomalyPoll();
+    } else {
+      switchTab('purchase');
+    }
+    try { localStorage.setItem(ADMIN_MODE_KEY, on ? '1' : '0'); } catch {}
+  }
+  adminBtn.addEventListener('click', () => setAdmin(!adminOn));
+
+  $('#openStepBtn').addEventListener('click', () => showPanelOnly('tab-step'));
+  $('#backFromStep').addEventListener('click', () => showPanelOnly('adminView'));
+
+  /* ============== Admin save ============== */
+  $('#adminSaveBtn').addEventListener('click', () => {
+    const d = {
+      cardinality: $('#adminCardinality').value,
+      percent:     Number($('#adminPercent').value) || 150,
+      prefix:      $('#adminPlatformPrefix').value.trim(),
+      dest:        $('#adminPlatformDest').value.trim(),
+    };
+    saveAdminDefaults(d);
+    applyAdminDefaultsToForms();
+    alert('設定已儲存。「智能採購建單」頁面的預設值已更新。');
+  });
+
+  /* ============== Schedule: form open/close ============== */
+  const scheduleForm  = $('#scheduleForm');
+  const scheduleEmpty = $('#scheduleEmpty');
+  $('#addScheduleBtn').addEventListener('click', () => openScheduleEditor(null));
+  $('#closeScheduleForm').addEventListener('click', closeScheduleEditor);
+  $('#cancelScheduleForm').addEventListener('click', closeScheduleEditor);
+
+  /* ============== Schedule: trigger-type dependent fields ============== */
+  const triggerType = $('#triggerType');
+  function refreshTrigger() {
+    const v = triggerType.value;
+    $$('[data-trigger]').forEach(node => {
+      node.hidden = node.dataset.trigger !== v;
     });
-    if (wasAtBottom) log.scrollTop = log.scrollHeight;
+  }
+  triggerType.addEventListener('change', refreshTrigger);
+
+  /* ============== Custom datetime picker ============== */
+  const dtOpenBtn   = $('#dtPickerOpen');
+  const dtLabel     = $('#dtPickerLabel');
+  const dtPicker    = $('#dtPicker');
+  const dtBackdrop  = $('#dtBackdrop');
+  const dtDate      = $('#dtPickerDate');
+  const dtTime      = $('#dtPickerTime');
+  const schOnceValue = $('#schOnceValue');
+
+  function openDtPicker() {
+    if (!dtDate.value) dtDate.value = new Date().toISOString().slice(0, 10);
+    dtPicker.hidden = false;
+    dtBackdrop.hidden = false;
+  }
+  function closeDtPicker() {
+    dtPicker.hidden = true;
+    dtBackdrop.hidden = true;
+  }
+  dtOpenBtn.addEventListener('click', openDtPicker);
+  dtBackdrop.addEventListener('click', closeDtPicker);
+  $('#dtPickerCancel').addEventListener('click', closeDtPicker);
+  $('#dtPickerConfirm').addEventListener('click', () => {
+    if (!dtDate.value || !dtTime.value) { closeDtPicker(); return; }
+    dtLabel.textContent = `${dtDate.value}  ${dtTime.value}`;
+    dtOpenBtn.classList.add('has-value');
+    schOnceValue.value = `${dtDate.value}T${dtTime.value}`;
+    closeDtPicker();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !dtPicker.hidden) closeDtPicker();
+  });
+
+  /* ============== 一鍵採購 / Step job runner ============== */
+  let activeJobId = null;
+  let pollTimer = null;
+  const logbox      = $('#logbox');
+  const logSummary  = $('#logSummary');
+  const stopJobBtn  = $('#stopJobBtn');
+
+  function setRunButtonsEnabled(enabled) {
+    $('#indoExecuteBtn').disabled  = !enabled;
+    $('#t1688ExecuteBtn').disabled = !enabled;
+    $('#stepPreviewBtn').disabled  = !enabled;
+    $('#stepExecuteBtn').disabled  = !enabled;
   }
 
-  /* ========== 一鍵完成：收集表單 ========== */
-  function collectOneClickParams(execute) {
-    return {
-      step: 'purchase-create',
-      execute: !!execute,
-      keyword:     $('#keyword').value.trim(),
-      keywordType: $('#keywordType').value,
-      cardinality: $('#cardinality').value,
-      percent:     $('#percent').value,
-      platform:    $('#platformPreview').value,
+  function clearLogBox(box) {
+    if (!box) box = logbox;
+    box.textContent = '';
+    if (box === logbox) logSummary.textContent = '';
+  }
+
+  function appendLog(box, logs) {
+    if (!logs || !logs.length) return;
+    // 首次注入時清除 "// no output..." placeholder
+    if (box.firstChild && box.firstChild.nodeType === Node.TEXT_NODE) {
+      box.textContent = '';
+    }
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    logs.forEach(l => {
+      const cls = l.stream === 'stderr' ? 'stderr' : classifyLog(l.text);
+      const node = document.createElement('div');
+      node.textContent = l.text;
+      if (cls && LOG_COLOR[cls]) node.style.color = LOG_COLOR[cls];
+      if (cls === 'create') node.style.fontWeight = '600';
+      box.appendChild(node);
+    });
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function setBadge(badge, state) {
+    if (!badge) return;
+    const map = {
+      running:   { text: '● 執行中',   cls: 'badge badge--dry' },
+      done:      { text: '● 完成',     cls: 'badge badge--ghost' },
+      failed:    { text: '● 失敗',     cls: 'badge badge--ghost' },
+      cancelled: { text: '● 已停止',   cls: 'badge badge--ghost' },
+      idle:      { text: '● 待執行',   cls: 'badge badge--ghost' },
     };
+    const m = map[state] || map.idle;
+    badge.textContent = m.text;
+    badge.className = m.cls;
+    if (state === 'failed') badge.style.color = 'var(--c-danger)';
+    else badge.style.color = '';
   }
 
-  /* ========== 分步執行：收集表單 ========== */
-  function collectStepParams(execute) {
-    const mainId = $('#stepMainId').value.trim();
-    return {
-      step: 'purchase-create',
-      execute: !!execute,
-      // 用主貨號當 keyword + ProductCode 搜尋（server-side 精準過濾）
-      keyword:     mainId,
-      keywordType: 'ProductCode',
-      // 同時加 --only 做 client-side 二次過濾（雙保險）
-      only:        mainId,
-      cardinality: $('#stepCardinality').value,
-      percent:     $('#stepPercent').value,
-      platform:    $('#stepPlatformPreview').value,
-    };
-  }
-
-  async function startRun(view, params, execute) {
-    if (activeJobId) { alert('已有任務正在執行中，請先停止或等待完成'); return; }
-
-    if (execute && !params.platform) {
-      alert('採購平台不可空 — 請填入「採購平台前綴 + 寄送目的地」');
+  async function startJob(params, opts = {}) {
+    if (activeJobId) {
+      alert('已有任務正在執行中,請先停止或等待完成');
       return;
     }
-    if (execute) {
-      const onlyText = params.only ? `\n限定貨號: ${params.only}` : '';
-      const msg = `即將實際在 ERP 建立採購單。\n\n` +
-                  `關鍵字: ${params.keyword || '(空)'} (${params.keywordType})\n` +
-                  `算式: ${params.cardinality} × ${params.percent}%\n` +
-                  `平台: ${params.platform}` + onlyText +
-                  `\n\n確定執行？`;
-      if (!confirm(msg)) return;
-    }
-
-    view.logPanel.innerHTML = '';
-    appendLogTo(view, [{ text: `[client] starting ${execute ? 'EXECUTE' : 'DRY-RUN'} (${view.name})...`, stream: 'stdout' }]);
-    setViewStatus(view, 'running', execute ? 'EXECUTE' : 'DRY-RUN');
-    view.buttons.forEach((b) => { b.disabled = true; });
-    if (view.stopBtn) view.stopBtn.style.display = '';
+    const targetBox = opts.box || logbox;
+    targetBox.textContent = '';
+    appendLog(targetBox, [{ text: `[client] starting ${params.execute ? 'EXECUTE' : 'DRY-RUN'}...`, stream: 'stdout' }]);
+    setRunButtonsEnabled(false);
+    stopJobBtn.hidden = false;
+    setBadge(opts.badge, 'running');
 
     try {
       const r = await fetch('/api/start', {
@@ -183,14 +273,14 @@
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'start failed');
       activeJobId = data.jobId;
-      pollJob(view);
+      pollJob(targetBox, opts.badge);
     } catch (e) {
-      appendLogTo(view, [{ text: '[client error] ' + e.message, stream: 'stderr' }]);
-      finishRun(view, 'failed', '失敗');
+      appendLog(targetBox, [{ text: '[client error] ' + e.message, stream: 'stderr' }]);
+      finishJob('failed', opts.badge);
     }
   }
 
-  function pollJob(view) {
+  function pollJob(targetBox, badge) {
     if (!activeJobId) return;
     let since = 0;
     async function tick() {
@@ -198,322 +288,257 @@
       try {
         const r = await fetch(`/api/job/${activeJobId}?since=${since}`);
         const data = await r.json();
-        appendLogTo(view, data.logs);
+        appendLog(targetBox, data.logs);
         since = data.totalLogs;
-        if (view.logSummary) view.logSummary.textContent = `${data.totalLogs} lines`;
+        if (targetBox === logbox) logSummary.textContent = `${data.totalLogs} lines`;
         if (data.state === 'running') {
           pollTimer = setTimeout(tick, 500);
         } else {
-          appendLogTo(view, [{ text: `[client] job ${data.state} (exit=${data.exitCode})`,
-                              stream: data.state === 'done' ? 'stdout' : 'stderr' }]);
-          finishRun(view, data.state, data.state);
+          appendLog(targetBox, [{ text: `[client] job ${data.state} (exit=${data.exitCode})`,
+            stream: data.state === 'done' ? 'stdout' : 'stderr' }]);
+          finishJob(data.state, badge);
+          updateAnomalyBadge();
         }
       } catch (e) {
-        appendLogTo(view, [{ text: '[poll error] ' + e.message, stream: 'stderr' }]);
-        finishRun(view, 'failed', '失敗');
+        appendLog(targetBox, [{ text: '[poll error] ' + e.message, stream: 'stderr' }]);
+        finishJob('failed', badge);
       }
     }
     tick();
   }
 
-  function finishRun(view, state, label) {
+  function finishJob(state, badge) {
     activeJobId = null;
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-    setViewStatus(view, state, label);
-    view.buttons.forEach((b) => { b.disabled = false; });
-    if (view.stopBtn) view.stopBtn.style.display = 'none';
+    setRunButtonsEnabled(true);
+    stopJobBtn.hidden = true;
+    setBadge(badge, state);
   }
 
-  /* ========== 一鍵完成 binding ========== */
-  $('#btnDryRun').addEventListener('click', () => startRun(makeOneClickView(), collectOneClickParams(false), false));
-  $('#btnExecute').addEventListener('click', () => startRun(makeOneClickView(), collectOneClickParams(true),  true));
-  $('#btnStop').addEventListener('click', async () => {
+  stopJobBtn.addEventListener('click', async () => {
     if (!activeJobId) return;
     await fetch(`/api/stop/${activeJobId}`, { method: 'POST' });
   });
-  $('#btnClearLog').addEventListener('click', () => {
-    $('#logPanel').innerHTML = '';
-    $('#logSummary').textContent = '';
+  $('#clearLogBtn').addEventListener('click', () => {
+    logbox.textContent = '// no output. execute step to stream logs.';
+    logSummary.textContent = '';
   });
 
-  /* ========== 分步執行 binding ========== */
-  $$('.step[data-step-id]').forEach((card) => {
-    const view = makeStepView(card);
-    $$('[data-step-action]', card).forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const action = btn.dataset.stepAction;
-        if (action === 'stop') {
-          if (!activeJobId) return;
-          await fetch(`/api/stop/${activeJobId}`, { method: 'POST' });
-          return;
-        }
-        const mainId = $('#stepMainId').value.trim();
-        if (!mainId) {
-          alert('請先輸入主貨號 (MainId)');
-          $('#stepMainId').focus();
-          return;
-        }
-        const execute = (action === 'execute');
-        startRun(makeStepView(card), collectStepParams(execute), execute);
-      });
-    });
-  });
-
-  /* ========== Schedule tab ========== */
-  let editingScheduleId = null;
-  function fmtRelativeTime(ts) {
-    if (!ts) return '—';
-    const diff = ts - Date.now();
-    const abs = Math.abs(diff);
-    const m = Math.round(abs / 60000);
-    const h = Math.floor(m / 60);
-    const d = Math.floor(h / 24);
-    const future = diff > 0;
-    if (m < 1) return future ? '即將' : '剛剛';
-    if (m < 60) return `${m} 分鐘${future ? '後' : '前'}`;
-    if (h < 24) return `${h} 小時${m % 60 ? ' ' + (m % 60) + ' 分' : ''}${future ? '後' : '前'}`;
-    return `${d} 天${future ? '後' : '前'}`;
-  }
-  function fmtAbsoluteTime(ts) {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-  }
-  async function loadSchedules() {
-    const r = await fetch('/api/schedules');
-    const data = await r.json();
-    renderSchedules(data.schedules);
-  }
-  function renderSchedules(list) {
-    const c = $('#scheduleList');
-    c.innerHTML = '';
-    if (!list || list.length === 0) {
-      c.appendChild(el('div', { class: 'schedule-empty' }, '尚無排程。點「+ 新增排程」建立第一個自動執行任務。'));
+  /* ============== Indo / 1688 execute ============== */
+  $('#indoExecuteBtn').addEventListener('click', () => {
+    const prefix = ($('#indoPlatformPrefix').value || '').toLowerCase();
+    if (prefix.startsWith('1688')) {
+      alert('Indo 卡的「採購平台前綴」是 1688-，請改用下面的「1688 採購建單」按鈕。');
       return;
     }
-    list.forEach((s) => c.appendChild(renderScheduleCard(s)));
-  }
-  function renderScheduleCard(s) {
-    const card = el('div', { class: 'schedule-card' + (s.enabled ? '' : ' is-disabled') });
-    const statusClass = s.enabled ? 'status--running' : 'status--idle';
-    const statusLabel = s.enabled ? '已啟用' : '已停用';
-    const lastRunText = s.lastRun ? `${fmtAbsoluteTime(s.lastRun.finishedAt || s.lastRun.startedAt)} (${s.lastRun.state || 'unknown'})` : '尚未執行';
-    const triggerText = s.type === 'daily' ? `每日 ${s.time || '--:--'}` : `一次性 ${s.datetime ? fmtAbsoluteTime(new Date(s.datetime).getTime()) : '--'}`;
-    const opts = s.options || {};
-    const condText = `${opts.keywordType || 'Keyword'}=${opts.keyword || '(空)'}  ${opts.cardinality || '?'} × ${opts.percent || '?'}%`;
-    const modeText = opts.execute ? 'EXECUTE' : 'DRY-RUN';
-
-    card.innerHTML = `
-      <div class="schedule-card__head">
-        <span class="status ${statusClass}"><span class="status__dot"></span>${statusLabel}</span>
-        <h3 class="schedule-card__name"></h3>
-      </div>
-      <div class="schedule-card__meta">
-        <div><strong>條件</strong><code></code></div>
-        <div><strong>採購平台</strong><code></code></div>
-        <div><strong>觸發</strong><code></code></div>
-        <div><strong>模式</strong><code></code></div>
-        <div><strong>下次執行</strong><code></code></div>
-        <div><strong>上次執行</strong><code></code></div>
-      </div>
-    `;
-    card.querySelector('.schedule-card__name').textContent = s.name;
-    const codes = card.querySelectorAll('code');
-    codes[0].textContent = condText;
-    codes[1].textContent = opts.platform || '—';
-    codes[2].textContent = triggerText;
-    codes[3].textContent = modeText;
-    codes[4].textContent = s.nextRun ? `${fmtAbsoluteTime(s.nextRun)} (${fmtRelativeTime(s.nextRun)})` : '—';
-    codes[5].textContent = lastRunText;
-
-    const actions = el('div', { class: 'schedule-card__actions' }, [
-      el('button', { class: 'btn btn--ghost', onclick: () => runScheduleNow(s.id) }, '立即執行'),
-      el('button', { class: 'btn btn--ghost', onclick: () => editSchedule(s) }, '編輯'),
-      el('button', { class: 'btn btn--ghost', onclick: () => toggleSchedule(s.id, !s.enabled) }, s.enabled ? '停用' : '啟用'),
-      el('button', { class: 'btn btn--danger', onclick: () => deleteSchedule(s.id, s.name) }, '刪除'),
-    ]);
-    card.appendChild(actions);
-    return card;
-  }
-  function openEditor(s) {
-    editingScheduleId = s?.id || null;
-    const opts = s?.options || {};
-    $('#schName').value = s?.name || '';
-    $('#schType').value = s?.type || 'daily';
-    $('#schTime').value = s?.time || '09:00';
-    $('#schDatetime').value = s?.datetime || '';
-    $('#schKeywordType').value = opts.keywordType || 'Keyword';
-    $('#schKeyword').value = opts.keyword || '';
-    $('#schCardinality').value = opts.cardinality || 'SalesCount30';
-    $('#schPercent').value = opts.percent ?? 150;
-    $('#schPlatform').value = opts.platform || '';
-    $('#schExecute').checked = !!opts.execute;
-    onTypeChange();
-    $('#scheduleEditor').style.display = '';
-    $('#schName').focus();
-  }
-  function closeEditor() { editingScheduleId = null; $('#scheduleEditor').style.display = 'none'; }
-  function onTypeChange() {
-    const t = $('#schType').value;
-    $('#schTimeField').style.display = t === 'daily' ? '' : 'none';
-    $('#schDatetimeField').style.display = t === 'once' ? '' : 'none';
-  }
-  async function saveSchedule() {
-    const payload = {
-      name: $('#schName').value.trim() || '未命名排程',
-      type: $('#schType').value,
-      time: $('#schTime').value,
-      datetime: $('#schDatetime').value,
-      enabled: true,
-      options: {
-        execute:     $('#schExecute').checked,
-        keywordType: $('#schKeywordType').value,
-        keyword:     $('#schKeyword').value.trim(),
-        cardinality: $('#schCardinality').value,
-        percent:     $('#schPercent').value,
-        platform:    $('#schPlatform').value.trim(),
-      },
+    const params = {
+      step:        'purchase-create',
+      workflow:    'indo',
+      execute:     true,
+      keyword:     'Indo',
+      keywordType: 'Keyword',
+      cardinality: $('#indoCardinality').value,
+      percent:     $('#indoPercent').value,
+      platform:    ($('#indoPlatformPrefix').value || '') + ($('#indoPlatformDest').value || ''),
     };
-    const isEdit = !!editingScheduleId;
-    const url = isEdit ? `/api/schedules/${editingScheduleId}` : '/api/schedules';
-    const method = isEdit ? 'PATCH' : 'POST';
-    try {
-      const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'save failed');
-      closeEditor(); loadSchedules();
-    } catch (e) { alert('儲存失敗：' + e.message); }
-  }
-  async function editSchedule(s) { openEditor(s); }
-  async function toggleSchedule(id, enabled) {
-    await fetch(`/api/schedules/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
-    loadSchedules();
-  }
-  async function deleteSchedule(id, name) {
-    if (!confirm(`確定刪除排程「${name}」？此操作無法復原。`)) return;
-    await fetch(`/api/schedules/${id}`, { method: 'DELETE' });
-    loadSchedules();
-  }
-  async function runScheduleNow(id) {
-    if (!confirm('立即執行此排程？\n會以排程設定的模式（含可能的 EXECUTE）觸發。')) return;
-    const r = await fetch(`/api/schedules/${id}/run`, { method: 'POST' });
-    if (r.ok) alert('已觸發。請到「智能採購建單」分頁觀察進度（或重新整理本頁看上次執行欄位）。');
-    else alert('觸發失敗');
-    setTimeout(loadSchedules, 2000);
-  }
-  $('#scheduleNew').addEventListener('click', () => openEditor(null));
-  $('#schCancel').addEventListener('click', closeEditor);
-  $('#schSave').addEventListener('click', saveSchedule);
-  $('#schType').addEventListener('change', onTypeChange);
+    if (!params.platform) {
+      alert('採購平台不可空 — 請填入「採購平台前綴 + 寄送目的地」');
+      return;
+    }
+    const msg =
+      '即將在 ERP 實際建立 Indo 的採購單。\n\n' +
+      `算式: ${params.cardinality} × ${params.percent}%\n` +
+      `平台: ${params.platform}\n\n` +
+      '確定要執行嗎?';
+    if (!confirm(msg)) return;
+    startJob(params);
+  });
 
-  /* ========== Anomaly tab ========== */
+  $('#t1688ExecuteBtn').addEventListener('click', () => {
+    const params = {
+      step:        'purchase-create',
+      workflow:    '1688',
+      execute:     true,
+      cardinality: $('#t1688Cardinality').value,
+      percent:     $('#t1688Percent').value,
+      platform:    ($('#t1688PlatformPrefix').value || '') + ($('#t1688PlatformDest').value || ''),
+    };
+    if (!params.platform) {
+      alert('採購平台不可空 — 請填入「採購平台前綴 + 寄送目的地」');
+      return;
+    }
+    const msg =
+      '即將在 ERP 實際建立 1688 的採購單（含 SKSP 共同採購）。\n\n' +
+      `算式: ${params.cardinality} × ${params.percent}%\n` +
+      `平台: ${params.platform}\n\n` +
+      '確定要執行嗎?';
+    if (!confirm(msg)) return;
+    startJob(params);
+  });
+
+  /* ============== 分步執行 (preview / execute) ============== */
+  function bindPlatformKindSync(selectId, prefixId) {
+    const sel = $('#' + selectId);
+    const pre = $('#' + prefixId);
+    sel.addEventListener('change', () => {
+      pre.value = sel.value === '1688' ? '1688-' : 'indo-';
+    });
+  }
+  bindPlatformKindSync('stepPlatformKind', 'stepPlatformPrefix');
+
+  function buildStepParams(execute) {
+    const mainId = $('#stepMainId').value.trim();
+    const platKind = $('#stepPlatformKind').value;
+    const prefix   = ($('#stepPlatformPrefix').value || '').toLowerCase();
+    const is1688   = platKind === '1688' || prefix.startsWith('1688');
+    return {
+      step:        'purchase-create',
+      workflow:    is1688 ? '1688' : 'indo',
+      execute,
+      keyword:     mainId,
+      keywordType: 'ProductCode',
+      only:        mainId,
+      cardinality: $('#stepCardinality').value,
+      percent:     $('#stepPercent').value,
+      threshold:   is1688 ? 3 : 6,
+      platform:    ($('#stepPlatformPrefix').value || '') + ($('#stepPlatformDest').value || ''),
+    };
+  }
+
+  function stepRunnerFactory(mode, badgeId, logId) {
+    return () => {
+      const mainId = $('#stepMainId').value.trim();
+      if (!mainId) {
+        alert('請先輸入主貨號 (MainId)');
+        $('#stepMainId').focus();
+        return;
+      }
+      const execute = (mode === 'execute');
+      const params = buildStepParams(execute);
+      if (execute) {
+        if (!params.platform) { alert('採購平台不可空'); return; }
+        if (!confirm(`即將在 ERP 建立 ${mainId} 的採購單,確定?`)) return;
+      }
+      startJob(params, { box: $('#' + logId), badge: $('#' + badgeId) });
+    };
+  }
+  $('#stepPreviewBtn').addEventListener('click', stepRunnerFactory('preview', 'stepPreviewBadge', 'stepPreviewLog'));
+  $('#stepExecuteBtn').addEventListener('click', stepRunnerFactory('execute', 'stepExecuteBadge', 'stepExecuteLog'));
+
+  /* ============== Anomaly tab ============== */
   let anomalyPollTimer = null;
-  let anomalyLastTotal = -1;
 
   function fmtTime(ms) {
     if (!ms) return '—';
     const d = new Date(ms);
     const now = new Date();
     const sameDay = d.toDateString() === now.toDateString();
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
-    if (sameDay) return `今天 ${hh}:${mm}:${ss}`;
-    const mo = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${mo}/${dd} ${hh}:${mm}`;
+    const pad = n => String(n).padStart(2, '0');
+    if (sameDay) return `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
-  function typeChipMeta(type) {
+  function typeMeta(type) {
     switch (type) {
-      case 'insufficient-quantity':  return { label: '數量不足',     cls: 'insufficient' };
-      case 'stop-spec-skipped':      return { label: 'STOP 故沒訂購', cls: 'stop-skipped' };
-      default:                       return { label: type || '?',    cls: '' };
+      case 'insufficient-quantity': return { label: '數量不足',     cls: 'tag--warn' };
+      case 'stop-spec-skipped':     return { label: 'STOP 故沒訂購', cls: 'tag--warn' };
+      default:                      return { label: type || '?',    cls: '' };
     }
   }
 
-  function renderAnomalyCard(a) {
-    const meta = typeChipMeta(a.type);
-    const modeCls = a.mode === 'execute' ? 'anomaly-card__mode--execute' : '';
-    const detail = (() => {
-      const parts = [];
-      // 數量不足：加總 + 門檻 + 規格清單
-      if (typeof a.rawSum === 'number' && typeof a.threshold === 'number') {
-        parts.push(`加總 <code>${a.rawSum}</code> &lt; 門檻 <code>${a.threshold}</code>`);
-      }
-      // STOP 故沒訂購：規格 + 建議量
-      if (a.specLabel) {
-        const q = (a.suggestedQty !== undefined) ? `（建議 ${a.suggestedQty}）` : '';
-        parts.push(`規格 <code>${a.specLabel}</code>${q}`);
-      }
-      if (Array.isArray(a.tags) && a.tags.length) {
-        parts.push(`tags <code>[${a.tags.join(', ')}]</code>`);
-      }
-      if (Array.isArray(a.specs) && a.specs.length) {
-        const list = a.specs.map((s) => `${s.label} qty=${s.qty}`).join(' · ');
-        parts.push(`規格 ${list}`);
-      }
-      return parts.join('　');
-    })();
-
-    const card = el('div', { class: 'anomaly-card anomaly-card--' + meta.cls });
-    card.innerHTML = `
-      <div class="anomaly-card__time"></div>
-      <span class="anomaly-card__type anomaly-card__type--${meta.cls}"></span>
-      <div class="anomaly-card__body">
-        <div class="anomaly-card__mainid"></div>
-        <div class="anomaly-card__message"></div>
-        ${detail ? `<div class="anomaly-card__detail">${detail}</div>` : ''}
-      </div>
-      <div class="anomaly-card__meta">
-        <span class="anomaly-card__mode ${modeCls}"></span>
-        <button class="anomaly-card__delete" title="刪除這筆">✕</button>
-      </div>
-    `;
-    card.querySelector('.anomaly-card__time').textContent = fmtTime(a.time);
-    card.querySelector('.anomaly-card__type').textContent = meta.label;
-    card.querySelector('.anomaly-card__mainid').textContent = a.mainId + (a.productName ? '  ·  ' + a.productName.slice(0, 50) : '');
-    card.querySelector('.anomaly-card__message').textContent = a.message || '';
-    card.querySelector('.anomaly-card__mode').textContent = (a.mode || '').toUpperCase();
-    card.querySelector('.anomaly-card__delete').addEventListener('click', () => deleteAnomaly(a.id));
-    return card;
+  function detectPlatformFromAnomaly(a) {
+    const tags = Array.isArray(a.tags) ? a.tags : [];
+    if (tags.some(t => /indo/i.test(t)))   return 'indo';
+    if (tags.some(t => /1688/i.test(t)))   return '1688';
+    return '';
+  }
+  function platformLabel(kind) {
+    return kind === '1688' ? '1688' : kind === 'indo' ? 'Indo' : '—';
   }
 
-  function buildAnomalyQuery() {
-    const type = $('#anomalyTypeFilter').value;
-    const mode = $('#anomalyModeFilter').value;
-    const q    = $('#anomalySearch').value.trim();
-    const params = new URLSearchParams();
-    if (type) params.set('type', type);
-    if (mode) params.set('mode', mode);
-    if (q)    params.set('q', q);
-    return params.toString();
+  function renderAnomalyItem(a) {
+    const t = typeMeta(a.type);
+    const platKind = detectPlatformFromAnomaly(a);
+    const platTag = platKind ? `<span class="tag tag--plat">${platformLabel(platKind)}</span>` : '';
+    const modeBadge = (a.mode || '') === 'execute'
+      ? '<span class="badge" style="background:#fef2f2;color:#b91c1c;">EXECUTE</span>'
+      : '<span class="badge badge--dry">DRY-RUN</span>';
+
+    const detailBits = [];
+    if (typeof a.rawSum === 'number' && typeof a.threshold === 'number') {
+      detailBits.push(`加總 <code>${a.rawSum}</code> &lt; 門檻 <code>${a.threshold}</code>`);
+    }
+    if (a.specLabel) {
+      const q = (a.suggestedQty !== undefined) ? `(建議 ${a.suggestedQty})` : '';
+      detailBits.push(`規格 <code>${escapeHtml(a.specLabel)}</code>${q}`);
+    }
+    if (Array.isArray(a.specs) && a.specs.length) {
+      const list = a.specs.map(s => `<code>${escapeHtml(s.label)} qty=${s.qty}</code>`).join(' · ');
+      detailBits.push(`規格 ${list}`);
+    }
+    if (Array.isArray(a.tags) && a.tags.length) {
+      detailBits.push(`tags <code>[${a.tags.map(escapeHtml).join(', ')}]</code>`);
+    }
+
+    const title = `${escapeHtml(a.mainId || '')}${a.productName ? ' · ' + escapeHtml(String(a.productName).slice(0, 80)) : ''}`;
+
+    const li = document.createElement('li');
+    li.className = 'record';
+    li.innerHTML = `
+      <div class="record__meta">
+        <time>${fmtTime(a.time)}</time>
+        <span class="tag ${t.cls}">${t.label}</span>
+        ${platTag}
+      </div>
+      <div class="record__body">
+        <p class="record__title">${title}</p>
+        <p class="record__desc">${escapeHtml(a.message || '')}</p>
+        ${detailBits.length ? `<p class="record__detail">${detailBits.join(' · ')}</p>` : ''}
+      </div>
+      ${modeBadge}
+    `;
+    return li;
   }
 
   async function loadAnomalies() {
+    const params = new URLSearchParams();
+    const type = $('#anomalyTypeFilter').value;
+    const q    = $('#anomalySearch').value.trim();
+    if (type) params.set('type', type);
+    if (q)    params.set('q', q);
     try {
-      const qs = buildAnomalyQuery();
-      const r = await fetch('/api/anomalies' + (qs ? '?' + qs : ''));
+      const r = await fetch('/api/anomalies' + (params.toString() ? '?' + params.toString() : ''));
       const data = await r.json();
-      const list = data.anomalies || [];
-      $('#anomalyCount').textContent = `${list.length} 筆`;
+      let list = data.anomalies || [];
+
+      // client-side platform filter (後端 anomaly 沒記 platform 維度,用 tags 猜)
+      const platKind = $('#anomalyPlatformFilter').value;
+      if (platKind) list = list.filter(a => detectPlatformFromAnomaly(a) === platKind);
+
       const container = $('#anomalyList');
       container.innerHTML = '';
       if (list.length === 0) {
-        container.appendChild(el('div', { class: 'anomaly-empty' },
-          '尚無異常紀錄。執行採購任務後，數量不足 / STOP / POST 失敗會自動列在這裡。'));
+        const empty = document.createElement('li');
+        empty.style.listStyle = 'none';
+        empty.style.textAlign = 'center';
+        empty.style.padding = '40px 20px';
+        empty.style.color = 'var(--c-text-mute)';
+        empty.style.background = '#fff';
+        empty.style.border = '1px dashed var(--c-border)';
+        empty.style.borderRadius = '10px';
+        empty.textContent = '尚無異常紀錄。執行採購任務後,數量不足 / STOP 故沒訂購會列在這裡。';
+        container.appendChild(empty);
       } else {
-        list.forEach((a) => container.appendChild(renderAnomalyCard(a)));
+        list.forEach(a => container.appendChild(renderAnomalyItem(a)));
       }
-      // 更新 tab 上的紅色 badge（總數，不過濾）
+      $('#anomalyCount').innerHTML = `<b>${list.length}</b> 筆 <small>dry-run / execute 皆記錄</small>`;
       updateAnomalyBadge();
     } catch (e) {
-      console.warn('load anomalies failed', e);
+      console.warn('loadAnomalies failed', e);
     }
   }
 
   async function updateAnomalyBadge() {
-    // 拿總數（不帶 filter）
     try {
       const r = await fetch('/api/anomalies');
       const data = await r.json();
@@ -521,85 +546,295 @@
       const badge = $('#anomalyTabBadge');
       if (n > 0) {
         badge.textContent = n > 99 ? '99+' : String(n);
-        badge.style.display = '';
+        badge.hidden = false;
       } else {
-        badge.style.display = 'none';
+        badge.hidden = true;
       }
-      anomalyLastTotal = n;
     } catch {}
   }
 
   function startAnomalyPoll() {
     stopAnomalyPoll();
-    anomalyPollTimer = setInterval(() => {
-      // 若 tab 還在 active 才整 load；否則只更新 badge
-      const onTab = $('#tab-anomalies').classList.contains('is-active');
-      if (onTab) loadAnomalies();
-      else updateAnomalyBadge();
-    }, 5000);
+    anomalyPollTimer = setInterval(loadAnomalies, 5000);
   }
   function stopAnomalyPoll() {
     if (anomalyPollTimer) { clearInterval(anomalyPollTimer); anomalyPollTimer = null; }
   }
 
-  async function deleteAnomaly(id) {
-    if (!confirm('刪除這筆異常紀錄？')) return;
-    await fetch(`/api/anomalies/${id}`, { method: 'DELETE' });
-    loadAnomalies();
-  }
-  async function clearAllAnomalies() {
-    if (!confirm('清空全部異常紀錄？此操作無法復原。')) return;
-    await fetch('/api/anomalies', { method: 'DELETE' });
-    loadAnomalies();
-  }
-
-  function downloadAnomaliesCsv() {
-    const qs = buildAnomalyQuery();
-    // 用簡單的 <a download> 觸發瀏覽器下載，URL 帶當前 filter
-    const url = '/api/anomalies.csv' + (qs ? '?' + qs : '');
+  $('#anomalyRefreshBtn').addEventListener('click', loadAnomalies);
+  $('#anomalyDownloadBtn').addEventListener('click', () => {
+    const params = new URLSearchParams();
+    const type = $('#anomalyTypeFilter').value;
+    const q    = $('#anomalySearch').value.trim();
+    if (type) params.set('type', type);
+    if (q)    params.set('q', q);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = '';   // 讓瀏覽器吃 server 給的 Content-Disposition filename
+    a.href = '/api/anomalies.csv' + (params.toString() ? '?' + params.toString() : '');
+    a.download = '';
     document.body.appendChild(a);
     a.click();
     a.remove();
-  }
-
-  $('#btnAnomalyRefresh').addEventListener('click', loadAnomalies);
-  $('#btnAnomalyDownload').addEventListener('click', downloadAnomaliesCsv);
-  $('#btnAnomalyClear').addEventListener('click', clearAllAnomalies);
-  ['#anomalyTypeFilter', '#anomalyModeFilter', '#anomalySearch'].forEach((sel) => {
-    $(sel).addEventListener('input', loadAnomalies);
-    $(sel).addEventListener('change', loadAnomalies);
+  });
+  ['#anomalyTypeFilter', '#anomalyPlatformFilter', '#anomalySearch'].forEach(s => {
+    $(s).addEventListener('input', loadAnomalies);
+    $(s).addEventListener('change', loadAnomalies);
   });
 
-  // boot：背景定期更新 badge（不需要 polling list，只看總數）
+  /* ============== Schedule tab ============== */
+  let editingScheduleId = null;
+  const WEEKDAY_LABEL = ['日', '一', '二', '三', '四', '五', '六'];
+
+  function fmtAbsTime(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  function fmtRel(ts) {
+    if (!ts) return '—';
+    const diff = ts - Date.now();
+    const abs = Math.abs(diff);
+    const m = Math.round(abs / 60000);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    const future = diff > 0;
+    if (m < 1)  return future ? '即將' : '剛剛';
+    if (m < 60) return `${m} 分鐘${future ? '後' : '前'}`;
+    if (h < 24) return `${h} 小時${m % 60 ? ' ' + (m % 60) + ' 分' : ''}${future ? '後' : '前'}`;
+    return `${d} 天${future ? '後' : '前'}`;
+  }
+
+  function platformKindFromOptions(opts) {
+    if (!opts) return 'indo';
+    // 優先看 workflow 欄位(新版排程都會帶);舊資料 fallback 從字串判
+    if (opts.workflow === '1688') return '1688';
+    if (opts.workflow === 'indo') return 'indo';
+    const kw = (opts.keyword || '').toLowerCase();
+    if (kw.includes('1688') || (opts.platform || '').toLowerCase().includes('1688')) return '1688';
+    return 'indo';
+  }
+
+  function describeTrigger(s) {
+    if (s.type === 'once') {
+      return s.datetime ? `一次性 ${fmtAbsTime(new Date(s.datetime).getTime())}` : '一次性(未設定)';
+    }
+    if (s.type === 'weekly') {
+      const days = Array.isArray(s.weekdays) && s.weekdays.length
+        ? s.weekdays.slice().sort((a,b) => a - b).map(d => '週' + WEEKDAY_LABEL[d]).join('、')
+        : '(未選日)';
+      return `每${days} ${s.time || '--:--'}`;
+    }
+    return `每日 ${s.time || '--:--'}`;
+  }
+
+  async function loadSchedules() {
+    try {
+      const r = await fetch('/api/schedules');
+      const data = await r.json();
+      renderSchedules(data.schedules);
+    } catch (e) { console.warn('loadSchedules failed', e); }
+  }
+
+  function renderSchedules(list) {
+    const container = $('#scheduleList');
+    container.innerHTML = '';
+    if (!list || list.length === 0) {
+      scheduleEmpty.hidden = false;
+      return;
+    }
+    scheduleEmpty.hidden = true;
+    list.forEach(s => container.appendChild(renderScheduleCard(s)));
+  }
+
+  function renderScheduleCard(s) {
+    const opts = s.options || {};
+    const platKind = platformKindFromOptions(opts);
+    const lastRunText = s.lastRun
+      ? `${fmtAbsTime(s.lastRun.finishedAt || s.lastRun.startedAt)} (${s.lastRun.state || 'unknown'})`
+      : '尚未執行';
+
+    const card = el('div', {
+      class: 'card schedule-card' + (s.enabled ? '' : ' is-disabled'),
+      style: { opacity: s.enabled ? '1' : '0.55' },
+    });
+    card.innerHTML = `
+      <header class="card__head card__head--row">
+        <div>
+          <h3 class="card__title">
+            <span class="plat-dot plat-dot--${platKind === '1688' ? '1688' : 'indo'}"></span>
+            ${escapeHtml(s.name || '(未命名)')}
+          </h3>
+          <p class="card__sub">${escapeHtml(describeTrigger(s))} · ${platformLabel(platKind)}</p>
+        </div>
+        <div class="card__actions">
+          <span class="badge ${s.enabled ? 'badge--dry' : 'badge--ghost'}">${s.enabled ? '已啟用' : '已停用'}</span>
+        </div>
+      </header>
+      <div class="grid grid--2" style="font-size:13px;color:var(--c-text-sub);">
+        <div><b>採購條件</b><br><code style="font-family:var(--font-mono);background:var(--c-bg-soft);padding:1px 6px;border-radius:4px;">${escapeHtml(opts.cardinality || '')} × ${escapeHtml(String(opts.percent || ''))}% · 平台 "${escapeHtml(opts.platform || '')}"</code></div>
+        <div><b>下次執行</b><br>${s.nextRun ? fmtAbsTime(s.nextRun) + ' (' + fmtRel(s.nextRun) + ')' : '—'}</div>
+        <div><b>上次執行</b><br>${escapeHtml(lastRunText)}</div>
+      </div>
+      <div class="card__foot">
+        <button class="btn btn--ghost btn--sm" data-action="run">立即執行</button>
+        <button class="btn btn--ghost btn--sm" data-action="edit">編輯</button>
+        <button class="btn btn--ghost btn--sm" data-action="toggle">${s.enabled ? '停用' : '啟用'}</button>
+        <button class="btn btn--danger btn--sm" data-action="delete">刪除</button>
+      </div>
+    `;
+    card.querySelector('[data-action="run"]').addEventListener('click', () => runScheduleNow(s.id));
+    card.querySelector('[data-action="edit"]').addEventListener('click', () => openScheduleEditor(s));
+    card.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleSchedule(s.id, !s.enabled));
+    card.querySelector('[data-action="delete"]').addEventListener('click', () => deleteSchedule(s.id, s.name));
+    return card;
+  }
+
+  function openScheduleEditor(s) {
+    editingScheduleId = s ? s.id : null;
+    $('#scheduleFormTitle').textContent = s ? '編輯排程' : '新增排程';
+
+    const opts = (s && s.options) || {};
+    const platKind = platformKindFromOptions(opts);
+
+    $('#schName').value         = s ? (s.name || '') : '';
+    $('#schPlatformKind').value = platKind;
+    $('#triggerType').value     = s ? (s.type || 'daily') : 'daily';
+
+    $('#schDailyTime').value  = (s && s.type === 'daily'  && s.time) ? s.time : '09:00';
+    $('#schWeeklyTime').value = (s && s.type === 'weekly' && s.time) ? s.time : '09:00';
+    $$('#weekdayChips input[type=checkbox]').forEach(cb => {
+      const wd = parseInt(cb.dataset.weekday, 10);
+      cb.checked = (s && s.type === 'weekly' && Array.isArray(s.weekdays)) ? s.weekdays.includes(wd) : false;
+    });
+
+    schOnceValue.value = (s && s.type === 'once' && s.datetime) ? s.datetime : '';
+    if (schOnceValue.value) {
+      const m = schOnceValue.value.match(/^(\d{4}-\d{2}-\d{2})T?(\d{2}:\d{2})/);
+      if (m) {
+        dtDate.value = m[1];
+        dtTime.value = m[2];
+        dtLabel.textContent = `${m[1]}  ${m[2]}`;
+        dtOpenBtn.classList.add('has-value');
+      }
+    } else {
+      dtLabel.textContent = '點此選擇日期時間';
+      dtOpenBtn.classList.remove('has-value');
+    }
+
+    $('#schCardinality').value    = opts.cardinality   || 'SalesCount30';
+    $('#schPercent').value        = opts.percent       || 150;
+    $('#schPlatformPrefix').value = opts.platformPrefix || (platKind === '1688' ? '1688-' : 'indo-');
+    $('#schPlatformDest').value   = opts.platformDest   || 'Office';
+
+    refreshTrigger();
+    scheduleForm.hidden = false;
+    scheduleEmpty.hidden = true;
+    scheduleForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('#schName').focus();
+  }
+
+  function closeScheduleEditor() {
+    scheduleForm.hidden = true;
+    editingScheduleId = null;
+  }
+
+  $('#schPlatformKind').addEventListener('change', () => {
+    const kind = $('#schPlatformKind').value;
+    $('#schPlatformPrefix').value = kind === '1688' ? '1688-' : 'indo-';
+  });
+
+  $('#schSaveBtn').addEventListener('click', async () => {
+    const platKind = $('#schPlatformKind').value;
+    const type = $('#triggerType').value;
+    const prefix = $('#schPlatformPrefix').value.trim();
+    const dest   = $('#schPlatformDest').value.trim();
+    const platform = prefix + dest;
+    if (!platform) { alert('採購平台不可空'); return; }
+    // 防呆：下拉跟前綴必須一致(避免「下拉=Indo, 前綴=1688-」這種誤填)
+    const is1688 = platKind === '1688' || prefix.toLowerCase().startsWith('1688');
+    if (is1688 && platKind !== '1688') {
+      alert('前綴是 1688- 但平台下拉選的是 Indo,請統一(改下拉或改前綴)。');
+      return;
+    }
+    if (!is1688 && platKind === '1688') {
+      alert('平台下拉選 1688 但前綴不是 1688-,請統一(改下拉或改前綴)。');
+      return;
+    }
+
+    const payload = {
+      name: $('#schName').value.trim() || '未命名排程',
+      type,
+      enabled: true,
+      options: {
+        execute:     true,
+        workflow:    is1688 ? '1688' : 'indo',
+        keyword:     is1688 ? '' : 'Indo',
+        keywordType: is1688 ? 'ALL' : 'Keyword',
+        cardinality: $('#schCardinality').value,
+        percent:     $('#schPercent').value,
+        platform,
+        platformPrefix: prefix,
+        platformDest:   dest,
+      },
+    };
+    if (type === 'daily')  payload.time = $('#schDailyTime').value;
+    if (type === 'weekly') {
+      payload.time = $('#schWeeklyTime').value;
+      payload.weekdays = $$('#weekdayChips input[type=checkbox]')
+        .filter(cb => cb.checked)
+        .map(cb => parseInt(cb.dataset.weekday, 10));
+      if (payload.weekdays.length === 0) { alert('請至少選一天'); return; }
+    }
+    if (type === 'once') {
+      if (!schOnceValue.value) { alert('請選擇執行日期時間'); return; }
+      payload.datetime = schOnceValue.value;
+    }
+
+    const isEdit = !!editingScheduleId;
+    const url = isEdit ? `/api/schedules/${editingScheduleId}` : '/api/schedules';
+    const method = isEdit ? 'PATCH' : 'POST';
+    try {
+      const r = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'save failed');
+      closeScheduleEditor();
+      loadSchedules();
+    } catch (e) { alert('儲存失敗:' + e.message); }
+  });
+
+  async function toggleSchedule(id, enabled) {
+    await fetch(`/api/schedules/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    loadSchedules();
+  }
+  async function deleteSchedule(id, name) {
+    if (!confirm(`確定刪除排程「${name}」?此操作無法復原。`)) return;
+    await fetch(`/api/schedules/${id}`, { method: 'DELETE' });
+    loadSchedules();
+  }
+  async function runScheduleNow(id) {
+    if (!confirm('立即執行此排程?\n會以排程設定的模式觸發 (含 EXECUTE)。')) return;
+    const r = await fetch(`/api/schedules/${id}/run`, { method: 'POST' });
+    if (r.ok) alert('已觸發。請到「智能採購建單」頁面看執行 LOG,或稍後重新整理本頁看執行結果。');
+    else alert('觸發失敗');
+    setTimeout(loadSchedules, 2000);
+  }
+
+  /* ============== Boot ============== */
+  applyAdminDefaultsToForms();
+  refreshTrigger();
   updateAnomalyBadge();
   setInterval(updateAnomalyBadge, 15000);
 
-  /* ========== Admin mode toggle ========== */
-  // 員工預設視圖只看到「一鍵完成」+「異常紀錄」+「排程」與「執行採購」按鈕。
-  // 點右上角「⚙ 管理員」展開測試用元素：分步執行 sub-tab、DRY-RUN 按鈕、管理員 badge。
-  // 狀態存 localStorage，刷新後維持。
-  const adminToggleBtn = $('#adminToggle');
-  function applyAdminMode(isAdmin) {
-    document.body.classList.toggle('is-admin', isAdmin);
-    $('.admin-toggle__text', adminToggleBtn).textContent = isAdmin ? '退出管理員' : '管理員';
-    adminToggleBtn.classList.toggle('is-active', isAdmin);
-    if (!isAdmin) {
-      // 退出管理員時，若停留在分步執行 sub-tab，強制切回「一鍵完成」，
-      // 否則 admin-only 把分步 panel 隱藏後使用者會看到空白
-      $$('.tabs--sub .tab').forEach((t) =>
-        t.classList.toggle('is-active', t.dataset.subtab === 'purchase-oneclick'));
-      $$('.sub-panel').forEach((p) =>
-        p.classList.toggle('is-active', p.id === 'subtab-purchase-oneclick'));
-    }
-    try { localStorage.setItem('isAdmin', isAdmin ? '1' : '0'); } catch {}
-  }
-  adminToggleBtn.addEventListener('click', () => {
-    applyAdminMode(!document.body.classList.contains('is-admin'));
-  });
-  applyAdminMode((() => {
-    try { return localStorage.getItem('isAdmin') === '1'; } catch { return false; }
-  })());
+  let savedAdminMode = false;
+  try { savedAdminMode = localStorage.getItem(ADMIN_MODE_KEY) === '1'; } catch {}
+  if (savedAdminMode) setAdmin(true);
+
 })();

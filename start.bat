@@ -1,3 +1,5 @@
 @echo off
-REM Thin wrapper - delegates to PowerShell for proper UTF-8 / Unicode support
-powershell -ExecutionPolicy Bypass -NoProfile -File "%~dp0start.ps1"
+REM Smart Purchase Console - bat wrapper that delegates to start.vbs
+REM ASCII-only to avoid cmd code page misparsing of multi-byte chars.
+REM Zero-flash launch: point your shortcut directly at start.vbs instead.
+start "" wscript.exe "%~dp0start.vbs"

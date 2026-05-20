@@ -1,4 +1,4 @@
-# 智能採購控制台 - Stop Script
+﻿# 智能採購控制台 - Stop Script
 # Kills the server process listening on port 3001
 
 $ErrorActionPreference = 'Continue'
