@@ -32,62 +32,93 @@
 
 ---
 
-## 系統架構
+## 系統架構（含 Indo / 1688 雙 workflow）
 
 ```mermaid
 graph TB
-    subgraph Browser["瀏覽器 / 員工操作"]
-        UI["index.html + style.css<br/>IBM Plex Sans + 深綠色 accent"]
-        APP["app.js<br/>分步 / 一鍵 / 異常紀錄 / 排程"]
+    subgraph Browser["瀏覽器 (員工 + 管理員)"]
+        direction TB
+        CARD_INDO["<b>Indo 卡</b><br/>workflow=indo<br/>keyword=Indo, threshold=6"]
+        CARD_1688["<b>1688 卡</b><br/>workflow=1688<br/>含 SKSP 共同採購"]
+        STEP["<b>分步執行</b> (管理員)<br/>workflow 依 prefix 自動偵測<br/>SKSP 商品自動展開群組"]
+        ANOM_TAB["異常紀錄 tab<br/>5s polling + CSV 下載"]
+        SCHED_TAB["排程 tab<br/>每日 / 每週 / 一次性"]
     end
 
-    subgraph Server["後端 Node.js"]
-        SRV["server.js (port 3001)<br/>HTTP API + Job Manager"]
-        SCHED["排程引擎<br/>schedules.json"]
-        KEEP["Session keep-alive<br/>每 4 小時"]
+    subgraph Server["Node.js 後端 (port 3001)"]
+        SRV["server.js<br/>buildArgs: --workflow / --threshold / --only<br/>spawn child_process"]
+        KEEP["Session keep-alive<br/>每 4 小時 ping"]
     end
 
-    subgraph CLI["主邏輯（child_process）"]
-        PC["purchase-create.js<br/>主流程腳本"]
-        FETCH["_fetch-options.js<br/>supplier / translocation 拉選單"]
+    subgraph CLI["purchase-create.js (child_process)"]
+        direction TB
+        ENTRY["parseArgs<br/>--workflow indo / 1688"]
+        ENTRY --> BRANCH{workflow?}
+        BRANCH -->|indo| RIN["<b>runIndo()</b><br/>keyword=Indo<br/>threshold=6<br/>無標籤排除<br/>個別商品 1 張單"]
+        BRANCH -->|1688| R88["<b>run1688()</b> 兩階段"]
+        R88 --> P1["<b>Phase 1</b> 廣泛搜尋<br/>keywordType=ALL keyword=空<br/>threshold=3<br/>excludeTags=[Indo, TW, YLL, Thai, SKSP*]<br/>個別商品 1 張單"]
+        R88 --> P2["<b>Phase 2</b> SKSP 共同採購<br/>keyword=SKSP<br/>依 SKSP### 分組<br/>群組 rawSum≥3 才合單<br/><b>多商品合 1 張單</b>"]
     end
 
     subgraph Lib["共用 Library"]
-        SES["lib/session.js<br/>Playwright + reCAPTCHA fallback"]
-        HTTP["lib/http-client.js<br/>Purchase / Supplier / Translocation"]
-        RULE["lib/purchase-rules.js<br/>parseTags / decideProduct / buildAddPayload"]
+        RULE["<b>purchase-rules.js</b><br/>純函數規則引擎<br/>• decideProduct<br/>• buildAddPayload (個別)<br/>• buildGroupAddPayload (SKSP)<br/>• getSkspCode / excludeTags"]
+        HTTP["http-client.js<br/>180s timeout + 2 retry<br/>+ heartbeat 15s 進度"]
+        SES["session.js<br/>Playwright + chrome-profile<br/>(共用 distribution-print)"]
     end
 
-    subgraph State["持久化狀態"]
-        ANOM["state/anomalies.jsonl<br/>append-only"]
-        SCHEDFILE["schedules.json"]
+    subgraph State["持久化"]
+        ANOM["state/anomalies.jsonl<br/>insufficient-quantity<br/>stop-spec-skipped"]
     end
 
-    subgraph ERP["Ajin ERP"]
-        SRV01["srv01.ajinerp.com"]
-        PSL["/api/ProductOverview/ProductSpecList"]
-        ADD["/api/PurchaseSheet/add"]
-        PROF["chrome-profile<br/>(共用 distribution-print)"]
+    subgraph ERP["Ajin ERP (srv01.ajinerp.com)"]
+        PSL["GET /api/ProductOverview/ProductSpecList<br/>(60-90s 重型查詢)"]
+        ADD["POST /api/PurchaseSheet/add<br/>個別單 / SKSP 合單"]
     end
 
-    APP -.->|REST + polling| SRV
-    SRV --> SCHED & KEEP
-    SRV -->|spawn| PC & FETCH
-    SRV --> SCHEDFILE
-    PC --> SES & HTTP & RULE
-    PC -->|append| ANOM
-    APP -.->|GET /api/anomalies + CSV| ANOM
-    FETCH --> SES & HTTP
-    SES -.->|persistent context| PROF
-    PROF -.-> SRV01
-    HTTP -.-> SRV01
-    SRV01 --> PSL & ADD
+    CARD_INDO -.->|REST| SRV
+    CARD_1688 -.->|REST| SRV
+    STEP -.->|REST + --only| SRV
+    SCHED_TAB -.->|排程觸發| SRV
+    SRV -->|spawn + env PURCHASE_RUN_ID| ENTRY
+    RIN --> RULE
+    P1 --> RULE
+    P2 --> RULE
+    RIN --> HTTP
+    P1 --> HTTP
+    P2 --> HTTP
+    HTTP --> SES
+    HTTP -.->|查清單| PSL
+    HTTP -.->|建單| ADD
+    RIN -.->|append| ANOM
+    P1 -.->|append| ANOM
+    P2 -.->|append per-group| ANOM
+    ANOM_TAB -.->|GET /api/anomalies + .csv| ANOM
+    KEEP -.->|keepalive| SES
 
-    classDef rule fill:#e7f0ea,stroke:#2d6a4f,color:#1d4a37
-    classDef api fill:#e3e3e3,stroke:#666
-    class RULE,PC rule
-    class SRV01,PSL,ADD,PROF api
+    classDef indo fill:#e7f0ea,stroke:#2d6a4f,color:#1d4a37
+    classDef p1688 fill:#dfe9ff,stroke:#3056a8,color:#1f3a73
+    classDef api fill:#fce8d5,stroke:#a05a1d,color:#5a3010
+    classDef rule fill:#fff5d9,stroke:#a8851a,color:#5a4509
+    class CARD_INDO,RIN indo
+    class CARD_1688,R88,P1,P2 p1688
+    class PSL,ADD api
+    class RULE rule
 ```
+
+**圖例**：
+- 🟢 綠色 = Indo workflow（單一商品 1 張單，threshold=6）
+- 🔵 藍色 = 1688 workflow（兩階段：廣泛 + SKSP 共同採購，threshold=3）
+- 🟡 黃色 = 純函數規則引擎（共用，無 IO 副作用）
+- 🟠 橘色 = ERP API endpoint
+
+**Workflow 入口對照**：
+
+| 員工/管理員 入口 | UI 元件 | workflow 傳遞 | CLI 行為 |
+|---|---|---|---|
+| 員工 — Indo 卡 | `#indoExecuteBtn` | `workflow=indo`（寫死）| runIndo: keyword=Indo, threshold=6 |
+| 員工 — 1688 卡 | `#t1688ExecuteBtn` | `workflow=1688`（寫死）| run1688: Phase 1 + Phase 2 |
+| 管理員 — 分步執行 | `#stepPreviewBtn` / `#stepExecuteBtn` | `workflow` 依 `stepPlatformKind` OR `prefix.startsWith('1688')` 偵測 | 加 `--only MainId`；SKSP 商品時 Phase 2 只跑相關群組 |
+| 管理員 — 排程 | `#schSaveBtn` | dropdown + prefix 須一致，存到 `schedules.json` | 排程觸發時依存的 `workflow` 跑 |
 
 ---
 
