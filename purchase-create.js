@@ -148,7 +148,8 @@ function formatDecision(d) {
     'skip-tag-excluded':     '[SKIP-TAG]',
   }[d.decision] || '[UNKNOWN]';
 
-  lines.push(`${decisionLabel}  ${d.mainId}  ${d.productName ? '— ' + d.productName.slice(0, 50) : ''}`);
+  lines.push(`${decisionLabel}  ${d.mainId}  ${d.productName ? '— ' + d.productName.slice(0, 50) : ''}` +
+             (d.excludeReason ? `  (${d.excludeReason})` : ''));
   lines.push(`    tags: [${d.tags.all.join(', ') || '-'}]` +
              (d.tags.multiplier ? `  multiplier: ${d.tags.multiplier}X` : '') +
              (d.tags.hasStop ? '  STOP' : ''));

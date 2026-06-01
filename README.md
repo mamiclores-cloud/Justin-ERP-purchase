@@ -8,13 +8,19 @@
 
 | Workflow | 搜尋方式 | 加總門檻 | 標籤排除 | 特殊 |
 |---|---|---|---|---|
-| **Indo** | `Keyword='Indo'` | ≥ 6 | 無 | — |
-| **1688** | `keywordType='ALL'` 廣泛 | ≥ 3 | 排除 `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+| **Indo** | `Keyword='Indo'` | ≥ 6 | `special` 標籤 / 貨號開頭 `KDS`（全域） | — |
+| **1688** | `keywordType='ALL'` 廣泛 | ≥ 3 | `special` 標籤 / 貨號開頭 `KDS`（全域）＋ `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+
+> 全域不訂購（兩個 workflow 都跳過，語意同 STOP）：
+> - **`special` 標籤**：KeyWord 含 `special`（不分大小寫，精確比對單一 tag）→ `GLOBAL_EXCLUDE_TAGS`
+> - **貨號開頭 `KDS`**：`MainId` 以 `KDS` 開頭（例 KDS01 修眉刀 / KDS02 美妝蛋）→ `GLOBAL_EXCLUDE_CODE_PREFIXES`（KDS 在實際資料是貨號前綴，不是標籤）
+>
+> 定義在 `lib/purchase-rules.js`。
 
 對應流程（客戶逐字稿）：
 - 1️⃣ 設定搜尋條件 → 拉候選商品
 - 2️⃣ 套訂購條件（**規格加總 ≥ 門檻** + **NX 倍數**）
-- 3️⃣ 不訂購原則（**STOP 規格跳過** + **1688 標籤排除**）
+- 3️⃣ 不訂購原則（**STOP 規格跳過** + **special/KDS 全域標籤排除** + **1688 標籤排除**）
 - 4️⃣ 共同採購（**1688 only**：SKSP 同代碼合單）
 - 5️⃣ 異常回報（數量不足 / STOP 故沒訂購）
 
@@ -54,14 +60,14 @@ graph TB
         direction TB
         ENTRY["parseArgs<br/>--workflow indo / 1688"]
         ENTRY --> BRANCH{workflow?}
-        BRANCH -->|indo| RIN["<b>runIndo()</b><br/>keyword=Indo<br/>threshold=6<br/>無標籤排除<br/>個別商品 1 張單"]
+        BRANCH -->|indo| RIN["<b>runIndo()</b><br/>keyword=Indo<br/>threshold=6<br/>全域排除 special標籤/貨號KDS<br/>個別商品 1 張單"]
         BRANCH -->|1688| R88["<b>run1688()</b> 兩階段"]
         R88 --> P1["<b>Phase 1</b> 廣泛搜尋<br/>keywordType=ALL keyword=空<br/>threshold=3<br/>excludeTags=[Indo, TW, YLL, Thai, SKSP*]<br/>個別商品 1 張單"]
         R88 --> P2["<b>Phase 2</b> SKSP 共同採購<br/>keyword=SKSP<br/>依 SKSP### 分組<br/>群組 rawSum≥3 才合單<br/><b>多商品合 1 張單</b>"]
     end
 
     subgraph Lib["共用 Library"]
-        RULE["<b>purchase-rules.js</b><br/>純函數規則引擎<br/>• decideProduct<br/>• buildAddPayload (個別)<br/>• buildGroupAddPayload (SKSP)<br/>• getSkspCode / excludeTags"]
+        RULE["<b>purchase-rules.js</b><br/>純函數規則引擎<br/>• decideProduct<br/>• buildAddPayload (個別)<br/>• buildGroupAddPayload (SKSP)<br/>• getSkspCode / excludeTags<br/>• GLOBAL_EXCLUDE_TAGS (special)<br/>• GLOBAL_EXCLUDE_CODE_PREFIXES (貨號 KDS)"]
         HTTP["http-client.js<br/>180s timeout + 2 retry<br/>+ heartbeat 15s 進度"]
         SES["session.js<br/>Playwright + chrome-profile<br/>(共用 distribution-print)"]
     end
@@ -163,6 +169,7 @@ flowchart TD
 |---|---|---|
 | `NX`（例 `12X`、`6X`、`8X`）| 每個有 `needpurchaseQty` 的規格，無條件進位到 N 的倍數 | 通用 |
 | `STOP` | 進 `product.Remark` 讀 `STOP : <規格清單>`，列名的規格整個跳過（per-spec 記異常）；Remark 沒列規格 → 整品跳過 | 通用 |
+| `special` 標籤 / 貨號開頭 `KDS` | 不訂購：整品跳過（最高優先序，SKIP-TAG，不算異常）；`special` 比 KeyWord 標籤、`KDS` 比貨號(MainId)前綴，皆不分大小寫 | 通用（`GLOBAL_EXCLUDE_TAGS` / `GLOBAL_EXCLUDE_CODE_PREFIXES`）|
 | `Indo` / `TW` / `YLL` / `Thai` | — | **Indo workflow**: 一般處理；**1688 workflow**: SKIP-TAG（排除）|
 | `SKSP###`（例 `SKSP121`、`SKSP02`）| 共同採購供應商代碼 | **Indo workflow**: 忽略；**1688 workflow**: Phase 1 排除、Phase 2 合單 |
 | 其他（`150%` / `New0516` / `focallure` ...）| 一律忽略 | 通用 |
