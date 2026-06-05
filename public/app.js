@@ -501,6 +501,7 @@
       case 'stop-spec-skipped':     return { label: 'STOP 故沒訂購', cls: 'tag--warn' };
       case 'tw-no-stock':           return { label: 'TW 三家沒貨',   cls: 'tag--warn' };
       case 'tw-below-low-sales':    return { label: 'TW 湊不滿低銷', cls: 'tag--warn' };
+      case 'tw-data-gap':           return { label: 'TW 資料缺漏',   cls: 'tag--warn' };
       default:                      return { label: type || '?',    cls: '' };
     }
   }

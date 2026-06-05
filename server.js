@@ -33,6 +33,7 @@ const ANOMALY_TYPE_LABEL = {
   'stop-spec-skipped':     'STOP 故沒訂購',
   'tw-no-stock':           'TW 三家沒貨',
   'tw-below-low-sales':    'TW 湊不滿低銷',
+  'tw-data-gap':           'TW 資料缺漏',
 };
 
 // 跟 lib/purchase-rules.js 的 CARDINALITY_OPTIONS 對齊;這邊複製一份避免 server.js 載入業務 lib

@@ -257,6 +257,40 @@ function appendTwAnomalies(unshippable, opts) {
   return lines.length;
 }
 
+/* ---- 資料異常:已被分配建單,但該廠商缺單價(→$0)/ 盒裝品查不到每箱數量(被迫當散裝算)---- */
+function findDataAnomalies(alloc, specByKey) {
+  const out = [];
+  for (const v of VENDORS) {
+    for (const o of alloc.orders[v]) {
+      const spec = specByKey.get(o.key);
+      if (!spec) continue;
+      const vd = spec.vendors[v] || {};
+      const issues = [];
+      if (!Number(vd.unitPrice)) issues.push('缺單價(建單會是 $0)');
+      if (spec.isBox && !(Number(vd.boxSize) > 0)) issues.push('盒裝品查不到每箱數量(改用散裝量)');
+      if (issues.length) out.push({ key: o.key, vendor: v, qty: o.qty, issues });
+    }
+  }
+  return out;
+}
+
+function appendTwDataAnomalies(items, opts) {
+  if (!items || !items.length) return 0;
+  const dir = path.dirname(ANOMALY_LOG);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const now = Date.now();
+  const lines = items.map((it) => JSON.stringify({
+    time: now, runId: RUN_ID, mode: 'execute',
+    cardinality: opts.cardinality, percent: opts.percent,
+    mainId: it.key, productName: '',
+    type: 'tw-data-gap',
+    message: `${String(it.key).replace(/\n/g, ' ')}(${it.vendor}):${it.issues.join('、')}`,
+    platform: 'tw', tags: ['TW'],
+  }));
+  fs.appendFileSync(ANOMALY_LOG, lines.join('\n') + '\n');
+  return lines.length;
+}
+
 async function main() {
   const opts = parseArgs();
   log(`=== TW ${opts.uploads ? '一鍵全流程' : 'Phase B'} — ${opts.execute ? 'EXECUTE' : 'DRY-RUN'} | date ${opts.date} (${dateNoOf(opts.date)}) ===`);
@@ -307,6 +341,8 @@ async function main() {
     log(`  ${v}: ${alloc.orders[v].length} 項  金額 ${Math.round(alloc.vendorTotals[v])}  (低銷 ${lowSales[v]})`);
   }
   log(`  訂不到 ${alloc.unshippable.length}(三家沒貨/湊不滿低銷)`);
+  const dataGaps = findDataAnomalies(alloc, specByKey);
+  if (dataGaps.length) log(`  資料異常 ${dataGaps.length}(缺單價 / 盒裝缺每箱數量)`);
 
   // 4) PO payloads
   const po = {};
@@ -334,8 +370,8 @@ async function main() {
     } finally {
       await context.close();
     }
-    anomaliesWritten = appendTwAnomalies(alloc.unshippable, opts);
-    log(`異常紀錄 +${anomaliesWritten}(訂不到)`);
+    anomaliesWritten = appendTwAnomalies(alloc.unshippable, opts) + appendTwDataAnomalies(dataGaps, opts);
+    log(`異常紀錄 +${anomaliesWritten}(訂不到 ${alloc.unshippable.length} / 資料異常 ${dataGaps.length})`);
   } else {
     await context.close();
   }
@@ -349,6 +385,7 @@ async function main() {
     unjoinedCount: unjoined.length,
     unjoinedSample: unjoined.slice(0, 50),
     missingPrice: missingPrice.slice(0, 50),
+    dataGaps: dataGaps.slice(0, 50),
     vendorTotals: alloc.vendorTotals,
     lowSales,
     orders: VENDORS.reduce((acc, v) => {
