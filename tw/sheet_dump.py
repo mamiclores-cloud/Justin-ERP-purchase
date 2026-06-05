@@ -31,6 +31,12 @@ def min_pcs(x):
     return int(m.group()) if m else 0
 
 
+def box_from_note(note):
+    # 有些品「每箱數量」欄空著,真正的一箱幾件寫在 Price 備註自由文字,如 "MIN 40 PCS" → 一箱 40 個
+    m = re.search(r"MIN\s*(\d+)\s*PCS", str(note or ""), re.I)
+    return int(m.group(1)) if m else 0
+
+
 def main():
     ws = M.open_check_stock()
     grid = ws.get("A1:LD1600")            # 需含右側「有庫存」欄
@@ -45,7 +51,7 @@ def main():
     base = {}
     for v in VENDORS:
         c = col(f"{v} product code")
-        base[v] = {"code": c, "price": c + 1, "box": c + 2, "min": c + 3}
+        base[v] = {"code": c, "price": c + 1, "box": c + 2, "min": c + 3, "note": c + 4}
 
     # 各廠商「最新(最右)」有庫存欄 — 用共用 find_latest_week(只認最右欄組,不新增)
     from sheet_write import find_latest_week
@@ -64,11 +70,15 @@ def main():
             code = str(r[b["code"]] if 0 <= b["code"] < len(r) else "").strip()
             sc = stockcol.get(v)
             has = sc is not None and sc < len(r) and str(r[sc]).strip().lower() == "v"
+            box = int(to_num(r[b["box"]] if b["box"] < len(r) else ""))
+            note = r[b["note"]] if b["note"] < len(r) else ""
+            if not box:                       # 每箱數量欄空 → 試從 Price 備註抓「MIN N PCS」
+                box = box_from_note(note)
             vd[v] = {
                 "code": code,
                 "hasStock": has,
                 "unitPrice": to_num(r[b["price"]] if b["price"] < len(r) else ""),
-                "boxSize": int(to_num(r[b["box"]] if b["box"] < len(r) else "")),
+                "boxSize": box,
                 "minPcs": min_pcs(r[b["min"]] if b["min"] < len(r) else ""),
             }
         rows.append({"product": prod, "vendors": vd})
