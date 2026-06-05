@@ -210,6 +210,8 @@
     $('#t1688ExecuteBtn').disabled = !enabled;
     $('#stepPreviewBtn').disabled  = !enabled;
     $('#stepExecuteBtn').disabled  = !enabled;
+    const twAll = $('#twAllExecuteBtn'); if (twAll) twAll.disabled = !enabled;
+    const twPbP = $('#twPbPreviewBtn'); if (twPbP) twPbP.disabled = !enabled;
   }
 
   function clearLogBox(box) {
@@ -442,18 +444,22 @@
     switch (type) {
       case 'insufficient-quantity': return { label: '數量不足',     cls: 'tag--warn' };
       case 'stop-spec-skipped':     return { label: 'STOP 故沒訂購', cls: 'tag--warn' };
+      case 'tw-no-stock':           return { label: 'TW 三家沒貨',   cls: 'tag--warn' };
+      case 'tw-below-low-sales':    return { label: 'TW 湊不滿低銷', cls: 'tag--warn' };
       default:                      return { label: type || '?',    cls: '' };
     }
   }
 
   function detectPlatformFromAnomaly(a) {
+    if (a.platform) return a.platform;            // TW Phase B 直接帶 platform 欄
     const tags = Array.isArray(a.tags) ? a.tags : [];
     if (tags.some(t => /indo/i.test(t)))   return 'indo';
     if (tags.some(t => /1688/i.test(t)))   return '1688';
+    if (tags.some(t => /^tw$/i.test(t)))   return 'tw';
     return '';
   }
   function platformLabel(kind) {
-    return kind === '1688' ? '1688' : kind === 'indo' ? 'Indo' : '—';
+    return kind === '1688' ? '1688' : kind === 'indo' ? 'Indo' : kind === 'tw' ? 'TW' : '—';
   }
 
   function renderAnomalyItem(a) {
@@ -607,6 +613,7 @@
   function platformKindFromOptions(opts) {
     if (!opts) return 'indo';
     // 優先看 workflow 欄位(新版排程都會帶);舊資料 fallback 從字串判
+    if (opts.workflow === 'tw') return 'tw';
     if (opts.workflow === '1688') return '1688';
     if (opts.workflow === 'indo') return 'indo';
     const kw = (opts.keyword || '').toLowerCase();
@@ -661,7 +668,7 @@
       <header class="card__head card__head--row">
         <div>
           <h3 class="card__title">
-            <span class="plat-dot plat-dot--${platKind === '1688' ? '1688' : 'indo'}"></span>
+            <span class="plat-dot plat-dot--${platKind}"></span>
             ${escapeHtml(s.name || '(未命名)')}
           </h3>
           <p class="card__sub">${escapeHtml(describeTrigger(s))} · ${platformLabel(platKind)}</p>
@@ -671,7 +678,7 @@
         </div>
       </header>
       <div class="grid grid--2" style="font-size:13px;color:var(--c-text-sub);">
-        <div><b>採購條件</b><br><code style="font-family:var(--font-mono);background:var(--c-bg-soft);padding:1px 6px;border-radius:4px;">${escapeHtml(opts.cardinality || '')} × ${escapeHtml(String(opts.percent || ''))}% · 平台 "${escapeHtml(opts.platform || '')}"</code></div>
+        <div><b>採購條件</b><br><code style="font-family:var(--font-mono);background:var(--c-bg-soft);padding:1px 6px;border-radius:4px;">${escapeHtml(opts.cardinality || '')} × ${escapeHtml(String(opts.percent || ''))}%${platKind === 'tw' ? ' · TW(最近上傳的庫存)' : ' · 平台 "' + escapeHtml(opts.platform || '') + '"'}</code></div>
         <div><b>下次執行</b><br>${s.nextRun ? fmtAbsTime(s.nextRun) + ' (' + fmtRel(s.nextRun) + ')' : '—'}</div>
         <div><b>上次執行</b><br>${escapeHtml(lastRunText)}</div>
       </div>
@@ -725,6 +732,7 @@
     $('#schPercent').value        = opts.percent       || 150;
     $('#schPlatformPrefix').value = opts.platformPrefix || (platKind === '1688' ? '1688-' : 'indo-');
     $('#schPlatformDest').value   = opts.platformDest   || 'Office';
+    setSchPlatformFields(platKind);
 
     refreshTrigger();
     scheduleForm.hidden = false;
@@ -738,34 +746,38 @@
     editingScheduleId = null;
   }
 
-  $('#schPlatformKind').addEventListener('change', () => {
-    const kind = $('#schPlatformKind').value;
-    $('#schPlatformPrefix').value = kind === '1688' ? '1688-' : 'indo-';
-  });
+  function setSchPlatformFields(kind) {
+    const isTw = kind === 'tw';
+    const pf = $('#schPrefixField'), df = $('#schDestField');
+    if (pf) pf.hidden = isTw;            // TW 自建 TW-{廠商} 平台,不需前綴/目的地
+    if (df) df.hidden = isTw;
+    if (!isTw) $('#schPlatformPrefix').value = kind === '1688' ? '1688-' : 'indo-';
+  }
+  $('#schPlatformKind').addEventListener('change', () => setSchPlatformFields($('#schPlatformKind').value));
 
   $('#schSaveBtn').addEventListener('click', async () => {
     const platKind = $('#schPlatformKind').value;
     const type = $('#triggerType').value;
-    const prefix = $('#schPlatformPrefix').value.trim();
-    const dest   = $('#schPlatformDest').value.trim();
-    const platform = prefix + dest;
-    if (!platform) { alert('採購平台不可空'); return; }
-    // 防呆：下拉跟前綴必須一致(避免「下拉=Indo, 前綴=1688-」這種誤填)
-    const is1688 = platKind === '1688' || prefix.toLowerCase().startsWith('1688');
-    if (is1688 && platKind !== '1688') {
-      alert('前綴是 1688- 但平台下拉選的是 Indo,請統一(改下拉或改前綴)。');
-      return;
-    }
-    if (!is1688 && platKind === '1688') {
-      alert('平台下拉選 1688 但前綴不是 1688-,請統一(改下拉或改前綴)。');
-      return;
-    }
 
-    const payload = {
-      name: $('#schName').value.trim() || '未命名排程',
-      type,
-      enabled: true,
-      options: {
+    let options;
+    if (platKind === 'tw') {
+      // TW 排程:用最近上傳的庫存快取 → 分配 + 建單(不需平台前綴/目的地)
+      options = {
+        execute:     true,
+        workflow:    'tw',
+        cardinality: $('#schCardinality').value,
+        percent:     $('#schPercent').value,
+      };
+    } else {
+      const prefix = $('#schPlatformPrefix').value.trim();
+      const dest   = $('#schPlatformDest').value.trim();
+      const platform = prefix + dest;
+      if (!platform) { alert('採購平台不可空'); return; }
+      // 防呆：下拉跟前綴必須一致
+      const is1688 = platKind === '1688' || prefix.toLowerCase().startsWith('1688');
+      if (is1688 && platKind !== '1688') { alert('前綴是 1688- 但平台下拉選的是 Indo,請統一(改下拉或改前綴)。'); return; }
+      if (!is1688 && platKind === '1688') { alert('平台下拉選 1688 但前綴不是 1688-,請統一(改下拉或改前綴)。'); return; }
+      options = {
         execute:     true,
         workflow:    is1688 ? '1688' : 'indo',
         keyword:     is1688 ? '' : 'Indo',
@@ -775,7 +787,14 @@
         platform,
         platformPrefix: prefix,
         platformDest:   dest,
-      },
+      };
+    }
+
+    const payload = {
+      name: $('#schName').value.trim() || '未命名排程',
+      type,
+      enabled: true,
+      options,
     };
     if (type === 'daily')  payload.time = $('#schDailyTime').value;
     if (type === 'weekly') {
@@ -827,8 +846,253 @@
     setTimeout(loadSchedules, 2000);
   }
 
+  /* ============== TW 庫存比對 ============== */
+  const TW_ADMIN_KEY = 'tw-admin-defaults-v1';
+  const TW_DEFAULTS = { showUnmatched: '0', allowExecute: '1' };
+  function loadTwDefaults() {
+    try { return { ...TW_DEFAULTS, ...JSON.parse(localStorage.getItem(TW_ADMIN_KEY) || '{}') }; }
+    catch { return { ...TW_DEFAULTS }; }
+  }
+  function saveTwDefaults(d) { try { localStorage.setItem(TW_ADMIN_KEY, JSON.stringify(d)); } catch {} }
+
+  function applyTwDefaults() {
+    const d = loadTwDefaults();
+    const su = $('#twAdminShowUnmatched'); if (su) su.value = d.showUnmatched;
+    const ae = $('#twAdminAllowExecute');  if (ae) ae.value = d.allowExecute;
+    // 員工一鍵卡:依「允許員工執行」顯示/隱藏執行鈕(關掉則只剩管理員預覽可測)
+    const allBtn = $('#twAllExecuteBtn');
+    if (allBtn) allBtn.hidden = (d.allowExecute !== '1');
+  }
+
+  function bindTwFile(inputId, textId) {
+    const inp = $('#' + inputId), txt = $('#' + textId);
+    if (!inp) return;
+    inp.addEventListener('change', () => {
+      const n = inp.files.length;
+      txt.textContent = n === 0 ? '點此選擇檔案'
+        : (n === 1 ? inp.files[0].name : `已選 ${n} 個檔案`);
+      const zone = txt.closest('.filezone');
+      if (zone) zone.classList.toggle('has-files', n > 0);
+    });
+  }
+  bindTwFile('twFileIL', 'twFileILText');
+  bindTwFile('twFileHS', 'twFileHSText');
+  bindTwFile('twFileIN', 'twFileINText');
+
+  // 員工一鍵全流程結果:Phase A(打勾)+ Phase B(分配/建單/回填/異常)
+  function renderTwAllResult(res) {
+    const box = $('#twAllResult');
+    if (!box || !res) return;
+    if (res.error) {
+      box.innerHTML = `<div class="tw-result__head"><span class="badge" style="background:#fef2f2;color:#b91c1c;">錯誤</span> ${escapeHtml(res.error)}</div>`;
+      box.hidden = false; return;
+    }
+    const a = res.phaseA;
+    let html = `<div class="tw-result__head"><span class="badge" style="background:#fef2f2;color:#b91c1c;">EXECUTE</span> <b>${escapeHtml(res.date || '')}</b> · 單號 ${escapeHtml(res.dateNo || '')} · ERP 需求 ${res.joined} 項</div>`;
+    if (a && a.matched) {
+      html += `<p class="tw-result__cols">① 庫存比對${a.usedCache ? '<b>(沿用上次庫存)</b>' : ''}:有貨打勾 IL <code>${a.matched.IL}</code> / HS <code>${a.matched.HS}</code> / IN <code>${a.matched.IN}</code>(寫入 ${a.written_cells || 0} 格)</p>`;
+    }
+    html += '<div class="tw-result__grid">';
+    ['IL', 'HS', 'IN'].forEach(v => {
+      const total = Math.round((res.vendorTotals && res.vendorTotals[v]) || 0);
+      const low = (res.lowSales && res.lowSales[v]) || 0;
+      const n = (res.orders && res.orders[v] && res.orders[v].length) || 0;
+      const posted = res.posted && res.posted[v];
+      const tag = posted
+        ? (posted.ok ? '<span class="badge badge--dry">已建單</span>' : '<span class="badge" style="background:#fef2f2;color:#b91c1c;">建單失敗</span>')
+        : (n && total < low ? '<span class="tag tag--warn">未達低銷</span>' : '');
+      html += `<div class="tw-stat"><span class="tw-stat__v">${n}</span><span class="tw-stat__k">${v} 採購單 ${tag}</span><small>金額 ${total} / 低銷 ${low}</small></div>`;
+    });
+    html += '</div>';
+    if (res.writeback) html += `<p class="tw-result__cols">② 回填 sheet:${res.writeback.written_cells || 0} 格(需求量 / 採購量)</p>`;
+    if (res.unshippable && res.unshippable.length) {
+      const noStock = res.unshippable.filter(u => u.reason === 'no-stock').length;
+      const below = res.unshippable.filter(u => u.reason === 'below-low-sales').length;
+      html += `<p class="tw-result__cols">訂不到 ${res.unshippable.length}(三家沒貨 ${noStock} · 湊不滿低銷 ${below})· 已記異常 ${res.anomaliesWritten || 0} 筆</p>`;
+    }
+    if (res.missingPrice && res.missingPrice.length) {
+      html += `<p class="tw-result__cols">⚠ 有貨但缺單價 ${res.missingPrice.length} 項(影響湊低銷,建議補 sheet 單價)</p>`;
+    }
+    const okv = ['IL', 'HS', 'IN'].filter(v => res.posted && res.posted[v] && res.posted[v].ok);
+    if (okv.length) html += `<p class="tw-result__cols">✓ 已建採購單:${okv.map(v => 'TW-' + v + ' ' + res.dateNo).join('、')}</p>`;
+    box.innerHTML = html;
+    box.hidden = false;
+  }
+
+  function pollTwJob(box, onResult) {
+    if (!activeJobId) return;
+    let since = 0;
+    async function tick() {
+      if (!activeJobId) return;
+      try {
+        const r = await fetch(`/api/job/${activeJobId}?since=${since}`);
+        const data = await r.json();
+        appendLog(box, data.logs);
+        since = data.totalLogs;
+        if (data.state === 'running') {
+          pollTimer = setTimeout(tick, 600);
+        } else {
+          appendLog(box, [{ text: `[client] job ${data.state} (exit=${data.exitCode})`, stream: data.state === 'done' ? 'stdout' : 'stderr' }]);
+          if (data.result && typeof onResult === 'function') onResult(data.result);
+          finishJob(data.state, null);
+        }
+      } catch (e) {
+        appendLog(box, [{ text: '[poll error] ' + e.message, stream: 'stderr' }]);
+        finishJob('failed', null);
+      }
+    }
+    tick();
+  }
+
+  // 員工一鍵:上傳三廠商檔 → 全流程(比對打勾 → 分配 → 建單 → 回填 → 異常),直接 EXECUTE
+  async function runTwAll() {
+    if (activeJobId) { alert('已有任務正在執行中,請先停止或等待完成'); return; }
+    const il = $('#twFileIL').files, hs = $('#twFileHS').files, ins = $('#twFileIN').files;
+    const total = il.length + hs.length + ins.length;
+    const msg = total === 0
+      ? '這次沒有上傳新庫存檔 → 將沿用「上次的庫存」直接跑採購建單(免重新比對)。\n確定執行?(若庫存有更新,請先上傳檔案)'
+      : `已選 ${total} 個檔(會更新本週庫存)。即將跑完整 TW 採購流程並【實際建立採購單】。\n確定執行?`;
+    if (!confirm(msg)) return;
+
+    const box = $('#twAllLog');
+    box.textContent = '';
+    appendLog(box, [{ text: `[client] ${total === 0 ? '沿用上次庫存' : '上傳 ' + total + ' 檔'},執行 TW 採購建單(全流程)...`, stream: 'stdout' }]);
+    $('#twAllResult').hidden = true;
+    setRunButtonsEnabled(false);
+    stopJobBtn.hidden = false;
+
+    const fd = new FormData();
+    for (const f of il) fd.append('IL', f);
+    for (const f of hs) fd.append('HS', f);
+    for (const f of ins) fd.append('IN', f);
+    fd.append('date', $('#twAllDate').value.trim());
+    fd.append('cardinality', $('#twAllCardinality').value);
+    fd.append('percent', $('#twAllPercent').value);
+    fd.append('execute', 'true');
+
+    try {
+      const r = await fetch('/api/tw/run-all', { method: 'POST', body: fd });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'TW 執行失敗');
+      activeJobId = data.jobId;
+      pollTwJob(box, renderTwAllResult);
+    } catch (e) {
+      appendLog(box, [{ text: '[client error] ' + e.message, stream: 'stderr' }]);
+      finishJob('failed', null);
+    }
+  }
+
+  $('#twAllExecuteBtn').addEventListener('click', runTwAll);
+
+  /* ====== TW Phase B:採購分配 + 建單 ====== */
+  function renderTwPbResult(res) {
+    const box = $('#twPbResult');
+    if (!box || !res) return;
+    if (res.error) {
+      box.innerHTML = `<div class="tw-result__head"><span class="badge" style="background:#fef2f2;color:#b91c1c;">錯誤</span> ${escapeHtml(res.error)}</div>`;
+      box.hidden = false; return;
+    }
+    const showUnmatched = loadTwDefaults().showUnmatched === '1';
+    const modeBadge = res.mode === 'execute'
+      ? '<span class="badge" style="background:#fef2f2;color:#b91c1c;">EXECUTE</span>'
+      : '<span class="badge badge--dry">DRY-RUN</span>';
+    let html = `<div class="tw-result__head">${modeBadge} <b>${escapeHtml(res.date || '')}</b> · 單號 ${escapeHtml(res.dateNo || '')} · ERP 需求 ${res.joined} 項</div>`;
+    html += '<div class="tw-result__grid">';
+    ['IL', 'HS', 'IN'].forEach(v => {
+      const total = Math.round((res.vendorTotals && res.vendorTotals[v]) || 0);
+      const low = (res.lowSales && res.lowSales[v]) || 0;
+      const n = (res.orders && res.orders[v] && res.orders[v].length) || 0;
+      const ok = total >= low && n > 0;
+      const poInfo = res.po && res.po[v];
+      const posted = res.posted && res.posted[v];
+      const tag = posted
+        ? (posted.ok ? '<span class="badge badge--dry">已建單</span>' : '<span class="badge" style="background:#fef2f2;color:#b91c1c;">建單失敗</span>')
+        : (n && !ok ? '<span class="tag tag--warn">未達低銷</span>' : '');
+      html += `<div class="tw-stat"><span class="tw-stat__v" style="${ok || posted ? '' : 'color:#b45309;'}">${n}</span>`
+        + `<span class="tw-stat__k">${v} 採購單 ${tag}</span>`
+        + `<small>金額 ${total} / 低銷 ${low}${poInfo ? (' · ' + poInfo.totalQty + '個') : ''}</small></div>`;
+    });
+    html += '</div>';
+    if (res.unshippable && res.unshippable.length) {
+      const noStock = res.unshippable.filter(u => u.reason === 'no-stock').length;
+      const below = res.unshippable.filter(u => u.reason === 'below-low-sales').length;
+      html += `<p class="tw-result__cols">訂不到 ${res.unshippable.length} 項:三家沒貨 ${noStock} · 湊不滿低銷 ${below}</p>`;
+    }
+    if (res.missingPrice && res.missingPrice.length) {
+      html += `<p class="tw-result__cols">⚠ 有貨但缺單價 ${res.missingPrice.length} 項(影響湊低銷,建議補 sheet 單價)</p>`;
+    }
+    if (showUnmatched) {
+      if (res.unjoinedCount) {
+        const s = res.unjoinedSample || [];
+        html += `<details class="tw-unmatched"><summary>ERP 有需求但 sheet 無對映(${res.unjoinedCount},顯示前 ${s.length})</summary><div>${s.map(escapeHtml).join('、')}</div></details>`;
+      }
+      if (res.missingPrice && res.missingPrice.length) {
+        html += `<details class="tw-unmatched"><summary>缺單價明細(${res.missingPrice.length})</summary><div>${res.missingPrice.map(m => escapeHtml(m.product + '(' + m.vendor + ')')).join('、')}</div></details>`;
+      }
+    }
+    box.innerHTML = html;
+    box.hidden = false;
+  }
+
+  // 管理員測試:分配預覽(dry-run,不上傳、不建單;用 sheet 目前有貨狀態試算)
+  async function twPbPreview() {
+    if (activeJobId) { alert('已有任務正在執行中,請先停止或等待完成'); return; }
+    const box = $('#twPbLog');
+    box.textContent = '';
+    appendLog(box, [{ text: '[client] TW 分配預覽 (DRY-RUN) ...', stream: 'stdout' }]);
+    $('#twPbResult').hidden = true;
+    setRunButtonsEnabled(false);
+    stopJobBtn.hidden = false;
+    try {
+      const r = await fetch('/api/tw/purchase', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          date: $('#twPbDate').value.trim(),
+          cardinality: $('#twPbCardinality').value,
+          percent: $('#twPbPercent').value,
+          execute: false,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'TW 預覽失敗');
+      activeJobId = data.jobId;
+      pollTwJob(box, renderTwPbResult);
+    } catch (e) {
+      appendLog(box, [{ text: '[client error] ' + e.message, stream: 'stderr' }]);
+      finishJob('failed', null);
+    }
+  }
+
+  $('#twPbPreviewBtn').addEventListener('click', twPbPreview);
+
+  const twAdminSaveBtn = $('#twAdminSaveBtn');
+  if (twAdminSaveBtn) {
+    twAdminSaveBtn.addEventListener('click', () => {
+      saveTwDefaults({
+        showUnmatched: $('#twAdminShowUnmatched').value,
+        allowExecute: $('#twAdminAllowExecute').value,
+      });
+      applyTwDefaults();
+      alert('TW 設定已儲存。「智能採購建單 → TW 庫存比對卡」已套用。');
+    });
+  }
+
   /* ============== Boot ============== */
   applyAdminDefaultsToForms();
+  applyTwDefaults();
+  // TW 欄組日期預填今天(YY/MM/DD);helper 留空也會用今天
+  (function () {
+    const d = new Date(); const p = (n) => String(n).padStart(2, '0');
+    const today = `${p(d.getFullYear() % 100)}/${p(d.getMonth() + 1)}/${p(d.getDate())}`;
+    if ($('#twAllDate')) $('#twAllDate').value = today;
+    if ($('#twPbDate')) $('#twPbDate').value = today;
+    // 需求算式/倍率沿用管理員預設(員工一鍵卡 + 管理員預覽卡)
+    const ad = loadAdminDefaults();
+    ['twAll', 'twPb'].forEach((pfx) => {
+      const c = $('#' + pfx + 'Cardinality'); if (c) c.value = ad.cardinality;
+      const pc = $('#' + pfx + 'Percent'); if (pc) pc.value = ad.percent;
+    });
+  })();
   refreshTrigger();
   updateAnomalyBadge();
   setInterval(updateAnomalyBadge, 15000);

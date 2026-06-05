@@ -6,6 +6,11 @@ yarn-debug.log*
 # ===== 敏感資料 =====
 # 含商店代碼/帳號/密碼
 secrets.js
+# TW Google Sheet 設定(sheet id / service account 金鑰路徑)
+tw/tw_secrets.json
+# Python 快取
+tw/__pycache__/
+**/__pycache__/
 # 共用 sister project 的 chrome-profile，本地保險也加上
 chrome-profile/
 chrome-profile.bak-*/

@@ -124,6 +124,76 @@
       </div>
     </div>
 
+    <!-- ===== TW 採購建單(員工一鍵全流程)===== -->
+    <div class="card platform-card" data-platform="tw">
+      <header class="card__head">
+        <div>
+          <h2 class="card__title"><span class="plat-dot plat-dot--tw"></span> TW 採購建單(一鍵)</h2>
+          <p class="card__sub">上傳三廠商當週庫存檔 → 自動比對打勾 → 抓 ERP 需求 → 依低銷/6倍數/BOX 分配 → 一廠商一張採購單 + 回填表格。<b>一顆按鈕跑完整個流程(會實際建單)。</b><br><span class="field__hint">庫存每週更新一次:沒上傳新檔就沿用上次的(免重新比對);有上傳就覆蓋更新。</span></p>
+        </div>
+      </header>
+
+      <div class="grid grid--3 tw-uploads">
+        <div class="field">
+          <label class="field__label">IL 庫存檔 <span class="field__hint">(圖片 / Excel / CSV / PDF 皆可,可多檔)</span></label>
+          <label class="filezone">
+            <input type="file" id="twFileIL" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp,.bmp" hidden />
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span class="filezone__text" id="twFileILText">點此選擇檔案</span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="field__label">HS 庫存檔 <span class="field__hint">(圖片 / Excel / CSV / PDF 皆可,可多檔)</span></label>
+          <label class="filezone">
+            <input type="file" id="twFileHS" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp,.bmp" hidden />
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span class="filezone__text" id="twFileHSText">點此選擇檔案</span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="field__label">IN 庫存檔 <span class="field__hint">(圖片 / Excel / CSV / PDF 皆可,可多檔)</span></label>
+          <label class="filezone">
+            <input type="file" id="twFileIN" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp,.bmp" hidden />
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span class="filezone__text" id="twFileINText">點此選擇檔案</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="grid grid--3" style="margin-top:16px;">
+        <div class="field">
+          <label class="field__label">需求算式</label>
+          <select class="input" id="twAllCardinality">
+            <option value="SafetyStock">安全庫存</option>
+            <option value="SalesCount7">7 日銷量</option>
+            <option value="SalesCount15">15 日銷量</option>
+            <option value="SalesCount30">30 日銷量</option>
+            <option value="SalesCount60">60 日銷量</option>
+            <option value="SalesCount90" selected>90 日銷量</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field__label">倍率 <span class="field__hint">(%)</span></label>
+          <input class="input" type="number" id="twAllPercent" value="150" min="1" max="999" />
+        </div>
+        <div class="field">
+          <label class="field__label">日期 <span class="field__hint">(YY/MM/DD,單號=MMDD)</span></label>
+          <input class="input" type="text" id="twAllDate" placeholder="自動帶今天" />
+        </div>
+      </div>
+
+      <div class="tw-result" id="twAllResult" hidden></div>
+
+      <div class="platform-card__action">
+        <button class="btn btn--primary btn--xl" id="twAllExecuteBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12l4 4L19 6"/></svg>
+          執行 TW 採購建單
+        </button>
+      </div>
+
+      <pre class="logbox logbox--sm" id="twAllLog">// 上傳 IL / HS / IN 三廠商當週庫存檔,按「執行 TW 採購建單」跑完整流程(比對→分配→建單→回填→異常)。</pre>
+    </div>
+
     <!-- ===== LOG ===== -->
     <div class="card card--log">
       <header class="card__head card__head--row">
@@ -161,6 +231,7 @@
             <option value="">全部</option>
             <option value="indo">Indo</option>
             <option value="1688">1688</option>
+            <option value="tw">TW</option>
           </select>
         </div>
         <div class="field">
@@ -169,6 +240,8 @@
             <option value="">全部</option>
             <option value="insufficient-quantity">數量不足</option>
             <option value="stop-spec-skipped">STOP 故沒訂購</option>
+            <option value="tw-no-stock">TW 三家沒貨</option>
+            <option value="tw-below-low-sales">TW 湊不滿低銷</option>
           </select>
         </div>
         <div class="field field--grow">
@@ -220,6 +293,7 @@
               <select class="input" id="schPlatformKind">
                 <option value="indo" selected>Indo</option>
                 <option value="1688">1688</option>
+                <option value="tw">TW(用最近上傳的庫存)</option>
               </select>
             </div>
           </div>
@@ -299,11 +373,11 @@
               <label class="field__label">倍率 <span class="field__hint">(%)</span></label>
               <input class="input" type="number" id="schPercent" value="150" min="1" max="999" />
             </div>
-            <div class="field">
+            <div class="field" id="schPrefixField">
               <label class="field__label">採購平台前綴</label>
               <input class="input" type="text" id="schPlatformPrefix" value="indo-" />
             </div>
-            <div class="field">
+            <div class="field" id="schDestField">
               <label class="field__label">寄送目的地</label>
               <input class="input" type="text" id="schPlatformDest" list="destList" value="Office" />
             </div>
@@ -394,6 +468,101 @@
           儲存設定
         </button>
       </div>
+    </div>
+
+    <!-- TW 庫存比對設定 -->
+    <div class="card card--settings">
+      <header class="card__head">
+        <div>
+          <h2 class="card__title"><span class="plat-dot plat-dot--tw"></span> TW 庫存比對設定</h2>
+          <p class="card__sub">控制「智能採購建單 → TW 庫存比對卡」的行為與顯示。</p>
+        </div>
+      </header>
+
+      <div class="settings">
+        <div class="setting-row">
+          <div class="setting-row__label">
+            <h4>顯示「沒對照」明細</h4>
+            <p>結果面板展開「廠商有貨、但 supplier sheet 找不到對照」的料號清單(資料維護用)</p>
+          </div>
+          <div class="setting-row__control">
+            <select class="input" id="twAdminShowUnmatched">
+              <option value="0" selected>不顯示(員工版精簡)</option>
+              <option value="1">顯示明細</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-row__label">
+            <h4>允許員工執行「回填」</h4>
+            <p>關閉時 TW 卡只剩「預覽」,避免員工誤寫 sheet;管理員可隨時開啟</p>
+          </div>
+          <div class="setting-row__control">
+            <select class="input" id="twAdminAllowExecute">
+              <option value="1" selected>允許(顯示回填鈕)</option>
+              <option value="0">僅預覽(隱藏回填鈕)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-row__label">
+            <h4>目標 sheet</h4>
+            <p>目前寫入對象(由 <code>tw/tw_secrets.json</code> 設定;正式上線再切正本)</p>
+          </div>
+          <div class="setting-row__control">
+            <input class="input" type="text" id="twAdminTarget" value="副本(測試)" readonly />
+          </div>
+        </div>
+      </div>
+
+      <div class="card__foot card__foot--right">
+        <button class="btn btn--primary btn--lg" id="twAdminSaveBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          儲存 TW 設定
+        </button>
+      </div>
+    </div>
+
+    <!-- TW 分配預覽(管理員測試)-->
+    <div class="card card--settings">
+      <header class="card__head">
+        <div>
+          <h2 class="card__title"><span class="plat-dot plat-dot--tw"></span> TW 分配預覽(測試)</h2>
+          <p class="card__sub">不上傳、不建單;用 supplier sheet 目前的有貨狀態試算分配,檢查規則 / 命中 / 訂不到。員工版是「一鍵直接執行」,這裡僅供管理員試算。</p>
+        </div>
+      </header>
+
+      <div class="grid grid--3">
+        <div class="field">
+          <label class="field__label">需求算式</label>
+          <select class="input" id="twPbCardinality">
+            <option value="SafetyStock">安全庫存</option>
+            <option value="SalesCount7">7 日銷量</option>
+            <option value="SalesCount15">15 日銷量</option>
+            <option value="SalesCount30">30 日銷量</option>
+            <option value="SalesCount60">60 日銷量</option>
+            <option value="SalesCount90" selected>90 日銷量</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field__label">倍率 <span class="field__hint">(%)</span></label>
+          <input class="input" type="number" id="twPbPercent" value="150" min="1" max="999" />
+        </div>
+        <div class="field">
+          <label class="field__label">日期 <span class="field__hint">(YY/MM/DD)</span></label>
+          <input class="input" type="text" id="twPbDate" placeholder="自動帶今天" />
+        </div>
+      </div>
+
+      <div class="tw-result" id="twPbResult" hidden></div>
+
+      <div class="card__foot card__foot--right">
+        <button class="btn btn--outline btn--lg" id="twPbPreviewBtn">分配預覽(Dry-Run)</button>
+      </div>
+
+      <pre class="logbox logbox--sm" id="twPbLog">// 試算分配,不建單、不上傳。</pre>
     </div>
 
     <!-- 進入單一貨號測試 -->

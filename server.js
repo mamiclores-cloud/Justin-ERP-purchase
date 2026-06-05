@@ -31,6 +31,8 @@ const EXPORT_DIR = path.join(__dirname, '異常紀錄');
 const ANOMALY_TYPE_LABEL = {
   'insufficient-quantity': '數量不足',
   'stop-spec-skipped':     'STOP 故沒訂購',
+  'tw-no-stock':           'TW 三家沒貨',
+  'tw-below-low-sales':    'TW 湊不滿低銷',
 };
 
 // 跟 lib/purchase-rules.js 的 CARDINALITY_OPTIONS 對齊;這邊複製一份避免 server.js 載入業務 lib
@@ -239,6 +241,179 @@ function stopJob(jobId) {
   catch { return false; }
 }
 
+/* ============ TW 庫存比對(子系統 A):上傳 + spawn Python helper ============ */
+// TW 是混合架構:Node 管 UI / job / 流程,sheet 讀寫 + 廠商檔解析 + 圖片 OCR 交給
+// tw/stock_match.py(Python)。設定(sheet id / 金鑰 / python 路徑)放 tw/tw_secrets.json。
+const TW_SECRETS_FILE = path.join(__dirname, 'tw', 'tw_secrets.json');
+const TW_UPLOAD_ROOT = path.join(__dirname, 'state', 'tw-uploads');
+const TW_VENDORS = ['IL', 'HS', 'IN'];
+
+function twSecrets() {
+  try { return JSON.parse(fs.readFileSync(TW_SECRETS_FILE, 'utf8')); } catch { return {}; }
+}
+function twPython() {
+  return process.env.TW_PYTHON || twSecrets().python_exe || 'python';
+}
+
+// 極簡 multipart/form-data 解析(Buffer-based,支援 binary 檔:圖片 / xls / pdf)
+function parseMultipart(buffer, contentType) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || '');
+  if (!m) return null;
+  const bBuf = Buffer.from('--' + (m[1] || m[2]).trim());
+  const CRLF2 = Buffer.from('\r\n\r\n');
+  const parts = [];
+  let start = buffer.indexOf(bBuf);
+  if (start < 0) return null;
+  start += bBuf.length;
+  while (start < buffer.length) {
+    if (buffer[start] === 0x2d && buffer[start + 1] === 0x2d) break;          // 結束 "--"
+    if (buffer[start] === 0x0d && buffer[start + 1] === 0x0a) start += 2;      // 跳 \r\n
+    const next = buffer.indexOf(bBuf, start);
+    if (next < 0) break;
+    let partEnd = next;
+    if (buffer[partEnd - 2] === 0x0d && buffer[partEnd - 1] === 0x0a) partEnd -= 2;
+    const headerEnd = buffer.indexOf(CRLF2, start);
+    if (headerEnd < 0 || headerEnd > partEnd) { start = next + bBuf.length; continue; }
+    const headerStr = buffer.toString('utf8', start, headerEnd);
+    const data = buffer.slice(headerEnd + 4, partEnd);
+    const nameM = /name="([^"]*)"/i.exec(headerStr);
+    const fileM = /filename="([^"]*)"/i.exec(headerStr);
+    parts.push({ name: nameM ? nameM[1] : '', filename: fileM ? fileM[1] : null, data });
+    start = next + bBuf.length;
+  }
+  return parts;
+}
+
+function readBodyBuffer(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+// spawn tw/stock_match.py 當 job(沿用 jobs dict + log 串流);stdout 最後一行 JSON = 結果
+function startTwJob(uploadsDir, opts) {
+  const jobId = newJobId();
+  const args = [path.join(__dirname, 'tw', 'stock_match.py'), '--uploads', uploadsDir];
+  if (opts.date) args.push('--date', opts.date);
+  if (opts.execute) args.push('--execute');
+  const job = {
+    id: jobId, step: 'tw-stock-match', name: 'TW 庫存比對',
+    cmdline: twPython() + ' ' + args.join(' '),
+    startedAt: Date.now(), state: 'running', logs: [], exitCode: null,
+    finishedAt: null, result: null, params: opts,
+  };
+  jobs[jobId] = job;
+  console.log(`[server] starting TW job ${jobId}: ${job.cmdline}`);
+  const child = spawn(twPython(), args, {
+    cwd: __dirname,
+    env: { ...process.env, FORCE_COLOR: '0', PYTHONIOENCODING: 'utf-8' },
+  });
+  job.process = child; job.pid = child.pid;
+  let outBuf = '', errBuf = '', lastJson = null;
+  const tryJson = (line) => {
+    const t = line.trim();
+    if (t.startsWith('{') && t.endsWith('}')) { try { lastJson = JSON.parse(t); } catch {} }
+  };
+  child.stdout.on('data', (d) => {
+    outBuf += d.toString('utf8');
+    const lines = outBuf.split('\n'); outBuf = lines.pop();
+    lines.forEach((line) => { job.logs.push({ time: Date.now(), stream: 'stdout', text: line }); tryJson(line); });
+  });
+  child.stderr.on('data', (d) => {
+    errBuf += d.toString('utf8');
+    const lines = errBuf.split('\n'); errBuf = lines.pop();
+    lines.forEach((line) => job.logs.push({ time: Date.now(), stream: 'stderr', text: line }));
+  });
+  child.on('close', (code) => {
+    if (outBuf) { job.logs.push({ time: Date.now(), stream: 'stdout', text: outBuf }); tryJson(outBuf); }
+    if (errBuf) job.logs.push({ time: Date.now(), stream: 'stderr', text: errBuf });
+    job.result = lastJson;
+    job.state = code === 0 ? 'done' : 'failed';
+    job.exitCode = code; job.finishedAt = Date.now();
+    console.log(`[server] TW job ${jobId} finished, exit=${code}`);
+    if (code === 0) markSessionValidFromJob();
+  });
+  child.on('error', (err) => {
+    job.logs.push({ time: Date.now(), stream: 'stderr', text: 'spawn error: ' + err.message });
+    job.state = 'failed'; job.exitCode = -1; job.finishedAt = Date.now();
+  });
+  return jobId;
+}
+
+// 把上傳的 multipart parts 存到 state/tw-uploads/{stamp}/{vendor}/,回 { dir, saved }
+function saveTwUploads(files) {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  const uploadsDir = path.join(TW_UPLOAD_ROOT, stamp);
+  let saved = 0;
+  const byVendor = { IL: 0, HS: 0, IN: 0 };
+  files.forEach((f, i) => {
+    const vendor = (f.name || '').toUpperCase();
+    if (!TW_VENDORS.includes(vendor)) return;
+    const vdir = path.join(uploadsDir, vendor);
+    fs.mkdirSync(vdir, { recursive: true });
+    const base = path.basename(f.filename || ('file' + i)).replace(/[^\w.\-]+/g, '_') || ('file' + i);
+    fs.writeFileSync(path.join(vdir, base), f.data);
+    saved++; byVendor[vendor]++;
+  });
+  return { dir: uploadsDir, stamp, saved, byVendor };
+}
+
+// spawn tw-purchase.js(Node 主控:ERP 需求 → 分配 → 建單)當 job;stdout 最後一行 JSON = 結果
+function startTwPurchaseJob(opts) {
+  const jobId = newJobId();
+  const args = [path.join(__dirname, 'tw-purchase.js')];
+  if (opts.uploads) args.push('--uploads', String(opts.uploads));
+  if (opts.useCache) args.push('--use-cache');
+  if (opts.date) args.push('--date', String(opts.date));
+  if (opts.cardinality) args.push('--cardinality', String(opts.cardinality));
+  if (opts.percent) args.push('--percent', String(opts.percent));
+  if (opts.maxProducts) args.push('--max-products', String(opts.maxProducts));
+  if (opts.execute) args.push('--execute');
+  const job = {
+    id: jobId, step: 'tw-purchase', name: 'TW 採購分配/建單',
+    cmdline: 'node ' + args.join(' '),
+    startedAt: Date.now(), state: 'running', logs: [], exitCode: null,
+    finishedAt: null, result: null, params: opts,
+  };
+  jobs[jobId] = job;
+  console.log(`[server] starting TW purchase job ${jobId}: ${job.cmdline}`);
+  const child = spawn('node', args, { cwd: __dirname, env: { ...process.env, FORCE_COLOR: '0', PURCHASE_RUN_ID: jobId } });
+  job.process = child; job.pid = child.pid;
+  let outBuf = '', errBuf = '', lastJson = null;
+  const tryJson = (line) => {
+    const t = line.trim();
+    if (t.startsWith('{') && t.endsWith('}')) { try { lastJson = JSON.parse(t); } catch {} }
+  };
+  child.stdout.on('data', (d) => {
+    outBuf += d.toString('utf8');
+    const ls = outBuf.split('\n'); outBuf = ls.pop();
+    ls.forEach((l) => { job.logs.push({ time: Date.now(), stream: 'stdout', text: l }); tryJson(l); });
+  });
+  child.stderr.on('data', (d) => {
+    errBuf += d.toString('utf8');
+    const ls = errBuf.split('\n'); errBuf = ls.pop();
+    ls.forEach((l) => job.logs.push({ time: Date.now(), stream: 'stderr', text: l }));
+  });
+  child.on('close', (code) => {
+    if (outBuf) { job.logs.push({ time: Date.now(), stream: 'stdout', text: outBuf }); tryJson(outBuf); }
+    if (errBuf) job.logs.push({ time: Date.now(), stream: 'stderr', text: errBuf });
+    job.result = lastJson;
+    job.state = code === 0 ? 'done' : 'failed';
+    job.exitCode = code; job.finishedAt = Date.now();
+    console.log(`[server] TW purchase job ${jobId} finished, exit=${code}`);
+    if (code === 0) markSessionValidFromJob();
+  });
+  child.on('error', (err) => {
+    job.logs.push({ time: Date.now(), stream: 'stderr', text: 'spawn error: ' + err.message });
+    job.state = 'failed'; job.exitCode = -1; job.finishedAt = Date.now();
+  });
+  return jobId;
+}
+
 /* ============ Supplier / Translocation cache ============ */
 const optCache = { suppliers: null, translocations: null, fetchedAt: 0 };
 const OPT_TTL = 5 * 60 * 1000;
@@ -338,7 +513,11 @@ async function fireSchedule(id) {
   s.lastRun = { startedAt, state: 'running' };
   saveSchedules();
   try {
-    const jobId = startJob('purchase-create', s.options || {});
+    const o = s.options || {};
+    // TW 排程:用最近上傳的庫存快取(不需上傳)→ tw-purchase.js;其餘走 purchase-create.js
+    const jobId = (o.workflow === 'tw')
+      ? startTwPurchaseJob({ cardinality: o.cardinality, percent: o.percent, execute: true, useCache: true })
+      : startJob('purchase-create', o);
     // poll until done
     while (jobs[jobId].state === 'running') await new Promise((r) => setTimeout(r, 1500));
     const j = jobs[jobId];
@@ -447,6 +626,66 @@ async function handleApi(req, res, urlPath) {
     }
   }
 
+  // POST /api/tw/run — TW 庫存比對(multipart 上傳三廠商檔 → spawn Python helper)
+  if (req.method === 'POST' && urlPath === '/api/tw/run') {
+    const ct = req.headers['content-type'] || '';
+    if (!/multipart\/form-data/i.test(ct)) {
+      return jsonResp(res, 400, { error: '需要 multipart/form-data' });
+    }
+    try {
+      const buf = await readBodyBuffer(req);
+      const parts = parseMultipart(buf, ct);
+      if (!parts) return jsonResp(res, 400, { error: 'multipart 解析失敗' });
+      const fields = {};
+      const files = [];
+      parts.forEach((p) => { if (p.filename) files.push(p); else fields[p.name] = p.data.toString('utf8'); });
+      const { dir, byVendor, saved } = saveTwUploads(files);
+      if (saved === 0) return jsonResp(res, 400, { error: '沒有有效的廠商檔(欄位名須為 IL / HS / IN)' });
+      const jobId = startTwJob(dir, { date: fields.date || '', execute: fields.execute === 'true' });
+      return jsonResp(res, 200, { jobId, saved, byVendor });
+    } catch (e) {
+      return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
+  // POST /api/tw/run-all — 員工一鍵:上傳廠商檔 → Phase A 比對寫 v → Phase B 分配+建單+回填+異常
+  if (req.method === 'POST' && urlPath === '/api/tw/run-all') {
+    const ct = req.headers['content-type'] || '';
+    if (!/multipart\/form-data/i.test(ct)) return jsonResp(res, 400, { error: '需要 multipart/form-data' });
+    try {
+      const buf = await readBodyBuffer(req);
+      const parts = parseMultipart(buf, ct);
+      if (!parts) return jsonResp(res, 400, { error: 'multipart 解析失敗' });
+      const fields = {};
+      const files = [];
+      parts.forEach((p) => { if (p.filename) files.push(p); else fields[p.name] = p.data.toString('utf8'); });
+      const { dir, byVendor, saved } = saveTwUploads(files);
+      // saved 可為 0:代表這次沒上傳新檔 → stock_match 會改用上次的庫存快取(免重新 OCR)
+      const jobId = startTwPurchaseJob({
+        uploads: dir, date: fields.date || '', cardinality: fields.cardinality || '',
+        percent: fields.percent || '', execute: fields.execute === 'true',
+      });
+      return jsonResp(res, 200, { jobId, saved, byVendor });
+    } catch (e) {
+      return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
+  // POST /api/tw/purchase — TW Phase B 分配 + 建單(JSON body: date/cardinality/percent/execute)
+  if (req.method === 'POST' && urlPath === '/api/tw/purchase') {
+    try {
+      const body = await readBody(req);
+      const p = JSON.parse(body || '{}');
+      const jobId = startTwPurchaseJob({
+        date: p.date || '', cardinality: p.cardinality || '', percent: p.percent || '',
+        maxProducts: p.maxProducts || '', execute: !!p.execute,
+      });
+      return jsonResp(res, 200, { jobId });
+    } catch (e) {
+      return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
   // GET /api/job/:id?since=N
   const mJob = urlPath.match(/^\/api\/job\/([^\/]+)$/);
   if (req.method === 'GET' && mJob) {
@@ -457,6 +696,7 @@ async function handleApi(req, res, urlPath) {
       id: job.id, step: job.step, name: job.name, state: job.state, exitCode: job.exitCode,
       startedAt: job.startedAt, finishedAt: job.finishedAt, cmdline: job.cmdline,
       logs: job.logs.slice(since), totalLogs: job.logs.length,
+      result: job.result || null,
     });
   }
 

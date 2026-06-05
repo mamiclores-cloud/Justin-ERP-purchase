@@ -4,12 +4,13 @@
 
 把原本 UI 上要逐張慢慢點的智能採購建單作業，壓縮成**輸入條件 → 一鍵建單 → 異常自動分類記錄**。HTTP-direct，不靠 UI 自動化。
 
-支援兩種工作流程：
+支援三種工作流程：
 
-| Workflow | 搜尋方式 | 加總門檻 | 標籤排除 | 特殊 |
+| Workflow | 搜尋方式 | 門檻 | 標籤排除 | 特殊 |
 |---|---|---|---|---|
-| **Indo** | `Keyword='Indo'` | ≥ 6 | `special` 標籤 / 貨號開頭 `KDS`（全域） | — |
-| **1688** | `keywordType='ALL'` 廣泛 | ≥ 3 | `special` 標籤 / 貨號開頭 `KDS`（全域）＋ `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+| **Indo** | `Keyword='Indo'` | 規格加總 ≥ 6 | `special` 標籤 / 貨號開頭 `KDS`（全域） | — |
+| **1688** | `keywordType='ALL'` 廣泛 | 規格加總 ≥ 3 | `special` 標籤 / 貨號開頭 `KDS`（全域）＋ `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+| **TW** | `Keyword='TW'` | 廠商低銷金額（IL 8000 / HS 3000 / IN 5000） | 同全域 | **多廠商庫存比對 + 跨廠商分配**：上傳三廠商庫存表 → 比對打勾 → 依低銷分配 → **一廠商一張採購單**；解析快取（庫存沒更新免重傳）。詳見下方 [TW 採購](#tw-採購第三-workflow跨廠商分配) |
 
 > 全域不訂購（兩個 workflow 都跳過，語意同 STOP）：
 > - **`special` 標籤**：KeyWord 含 `special`（不分大小寫，精確比對單一 tag）→ `GLOBAL_EXCLUDE_TAGS`
@@ -243,6 +244,102 @@ flowchart TD
 
 ---
 
+## TW 採購（第三 workflow，跨廠商分配）
+
+TW 跟 Indo / 1688 **本質不同**：不是 per-product 建單，而是把「三家廠商（IL / HS / IN）當週有什麼貨」對上「ERP 算出的需求量」，在**滿足各廠商低銷金額**下，把每個規格的需求量分配給有貨廠商，最後**依廠商各開一張採購單**。分兩個子系統：
+
+- **子系統 A — 庫存比對**：上傳三廠商庫存檔（IL=Excel+照片 / HS=PDF / IN=Excel；圖片 / Excel / CSV / PDF 皆可、可多檔）→ 解析（含**本地 RapidOCR**，不接 LLM）→ 比對 supplier sheet 料號（IL/HS 比料號、IN 比 barcode）→ 當週「有庫存」欄打 `v`。
+- **子系統 B — 分配 + 建單**：ERP（`Keyword=TW`）抓需求量 → 以 `MainId #N` join sheet → 分配演算法 → 一廠商一張採購單 POST ERP ＋ 回填採購量 ＋ 異常紀錄。
+
+> **架構**：Node 主導（UI / job / ERP / 建單）＋ Python helper（`tw/`：Google Sheet 讀寫 + 檔案解析 + RapidOCR）。Python 借用 sister 專案 `Justin-goods-status` 的 venv ＋ service account 金鑰（設定在 `tw/tw_secrets.json`，gitignore）。
+>
+> **庫存每週才更新一次** → 上傳是**選用**：有上傳就重新解析並覆蓋快取（`state/tw-stock/parsed.json`）；沒上傳就用上次快取（免 OCR、秒回，欄組日期沿用快取那一週）。
+
+### TW 系統架構
+
+```mermaid
+graph TB
+    subgraph Browser["瀏覽器"]
+        EMP["<b>員工</b> TW 採購建單(一鍵)<br/>上傳 IL/HS/IN(選用) + 需求算式"]
+        ADM["<b>管理員</b> TW 分配預覽(dry-run)<br/>+ TW 設定"]
+        SCH["<b>排程</b> 每日/每週/一次性<br/>workflow=tw(用快取庫存)"]
+    end
+    subgraph Node["Node 後端 (server.js, port 3001)"]
+        RUNALL["POST /api/tw/run-all<br/>multipart 上傳 + spawn"]
+        PURCH["POST /api/tw/purchase<br/>(管理員預覽)"]
+        TWPUR["<b>tw-purchase.js</b><br/>主控:join + 分配 + 建單"]
+        ALLOC["lib/tw-allocate.js<br/>純函數分配引擎"]
+        HTTP["lib/http-client.js<br/>POST PurchaseSheet/add"]
+    end
+    subgraph PY["Python helper (tw/, 借 goods-status venv)"]
+        SM["stock_match.py<br/>解析→比對→寫 v(+快取)"]
+        DUMP["sheet_dump.py<br/>讀 定價/有貨"]
+        WB["sheet_writeback.py<br/>回填 需求量/採購量"]
+        PARSE["parsers.py + RapidOCR<br/>xlsx/xls/csv/pdf/圖片"]
+    end
+    subgraph Ext["外部"]
+        GS["Google Sheet<br/>check stock 分頁"]
+        ERP["Ajin ERP<br/>Keyword=TW 需求 + 建單"]
+        CACHE["state/tw-stock/parsed.json<br/>解析快取"]
+    end
+    EMP -.->|REST| RUNALL
+    ADM -.->|REST| PURCH
+    SCH -.->|fireSchedule| TWPUR
+    RUNALL --> TWPUR
+    PURCH --> TWPUR
+    TWPUR --> SM
+    TWPUR --> ALLOC
+    TWPUR --> HTTP
+    SM --> PARSE
+    SM <-->|讀寫 v| GS
+    SM <-->|快取| CACHE
+    TWPUR --> DUMP
+    TWPUR --> WB
+    DUMP --> GS
+    WB --> GS
+    HTTP -.->|需求 / 建單| ERP
+
+    classDef tw fill:#eef2ff,stroke:#4f46e5,color:#3730a3
+    class TWPUR,ALLOC,SM tw
+```
+
+### TW 一鍵流程
+
+```mermaid
+flowchart TD
+    Start([員工按「執行 TW 採購建單」]) --> Up{有上傳新檔?}
+    Up -->|有| Parse[解析三廠商檔<br/>xlsx/csv/pdf/圖片 OCR<br/>→ 更新快取]
+    Up -->|沒有| Cache[讀上次快取<br/>免 OCR]
+    Parse --> WriteV[比對料號<br/>IL/HS 料號 · IN barcode<br/>→ sheet 打 v]
+    Cache --> WriteV
+    WriteV --> Demand[ERP Keyword=TW<br/>抓需求量 + GUID]
+    Demand --> Join[以 MainId #N join sheet]
+    Join --> Alloc[分配演算法<br/>6 倍數 / BOX / 補最低量<br/>低銷 IL8000 HS3000 IN5000<br/>需求全訂 · 湊不滿改別家]
+    Alloc --> PO[一廠商一張採購單<br/>TW-廠商 訂單號=日期<br/>POST add]
+    PO --> Back[回填 採購量 / 需求量 到 sheet]
+    Back --> Anom[訂不到 → 異常紀錄<br/>三家沒貨 / 湊不滿低銷]
+    Anom --> End([完成])
+
+    classDef a fill:#eef2ff,stroke:#4f46e5,color:#3730a3
+    class Parse,Cache,WriteV,Alloc a
+```
+
+### TW 分配規則
+
+| 規則 | 說明 |
+|---|---|
+| 數量取整 | 非 BOX：`ceil(max(需求, 最低量) / 6) * 6`（補最低量後進位 6 倍數）；BOX（ERP KeyWord 含 `BOX`）：訂整箱 = `ceil(需求 / 每箱幾件) * 每箱幾件` |
+| 單價 / 金額 | 取 sheet 各廠商單價；BOX 商品「單價 ≥ 箱數視為每箱價」→ ÷ 箱數還原成每個；金額 = 每個價 × 數量 |
+| 低銷門檻 | IL 8000 / HS 3000 / IN 5000；廠商被分到的總金額 ≥ 低銷才出貨 |
+| 分配目標 | 需求全訂（低銷只是出貨門檻）；多家有貨 → 分給最需湊低銷者；某家湊不滿 → 改分給別家有貨；都沒人接 → 記異常 |
+| 建單 | 一廠商一張單（`TW-IL`/`TW-HS`/`TW-IN`），`PurchasePlatform=TW-廠商`、`PurchasePlatformNo=日期 MMDD` |
+| 比對 key | IL/HS = 廠商料號（後綴變體、`I↔1` OCR 容錯）；IN = barcode（濾掉 `000000…` 補零內部碼） |
+| 異常 | `tw-no-stock`（三家沒貨）/ `tw-below-low-sales`（湊不滿低銷）→ 寫 `anomalies.jsonl`，02 異常 tab 可篩 |
+
+完整規格見 [`TW-採購規格.md`](TW-採購規格.md)。
+
+---
+
 ## UI 操作流程
 
 ```mermaid
@@ -423,7 +520,9 @@ GET /api/anomalies.csv?type=<>&mode=<>&q=<>
 ```
 .
 ├── server.js                  # HTTP server + Job Manager + Schedule + Session keep-alive
-├── purchase-create.js         # 主 CLI / 子程序腳本
+├── purchase-create.js         # Indo / 1688 主 CLI / 子程序腳本
+├── tw-purchase.js             # TW 主控（Phase A 比對 + Phase B 分配建單,spawn tw/ Python）
+├── TW-採購規格.md             # TW 完整規格（規則 / 架構 / 分配 / 快取）
 ├── _fetch-options.js          # 拉 supplier / translocation 選單給 UI 用
 ├── _keepalive.js              # server 定期 ping ERP dashboard 用
 ├── record-workflow.js         # （備用）開瀏覽器錄製操作，反推 API 時用
@@ -440,14 +539,29 @@ GET /api/anomalies.csv?type=<>&mode=<>&q=<>
 ├── lib/                       # 共用 Library
 │   ├── session.js             # Playwright 登入 + reCAPTCHA fallback（自 distribution-print）
 │   ├── http-client.js         # Purchase / Supplier / Translocation 命名空間
-│   ├── purchase-rules.js      # 純函數商業規則
+│   ├── purchase-rules.js      # Indo/1688 純函數商業規則
+│   ├── tw-allocate.js         # TW 跨廠商分配引擎（純函數,可獨立測）
 │   └── recorder.js            # 操作錄製器（反推 API 用）
 │
+├── tw/                        # TW Python helper（借 goods-status venv + gspread + RapidOCR）
+│   ├── stock_match.py         # Phase A:解析 → 比對 → 寫 v（+ 快取,上傳選用）
+│   ├── sheet_dump.py          # 讀 sheet 定價 / 有貨 → JSON
+│   ├── sheet_writeback.py     # 回填 需求量 / 採購量
+│   ├── parsers.py             # xlsx/xls/csv/pdf/圖片(RapidOCR) 解析
+│   ├── normalize.py           # 料號正規化 + barcode
+│   ├── match.py               # 讀 check stock + 比對
+│   ├── sheet_write.py         # 新增當週欄 + 打 v
+│   ├── config.py              # sheet / 金鑰設定載入
+│   └── tw_secrets.example.json
+│
 # 以下 gitignored，不會 commit：
-├── secrets.js                 # 你的實際憑證
+├── secrets.js                 # 你的實際憑證（Indo/1688 ERP 登入）
+├── tw/tw_secrets.json         # TW:sheet id / service account 金鑰路徑 / python 路徑
 ├── chrome-profile/            # （本專案預設指向 sister project 的，所以本目錄通常無此資料夾）
-├── state/                     # 排程 + 異常紀錄
-│   └── anomalies.jsonl
+├── state/                     # 排程 + 異常紀錄 + TW 上傳/快取
+│   ├── anomalies.jsonl
+│   ├── tw-stock/parsed.json   # TW 庫存解析快取
+│   └── tw-uploads/            # TW 上傳的廠商檔
 ├── analysis/                  # 反推來的 ERP 前端 JS（內部資料）
 └── node_modules/
 ```
@@ -466,6 +580,14 @@ GET /api/anomalies.csv?type=<>&mode=<>&q=<>
 | `/api/stop/:id` | POST | 終止 job |
 | `/api/suppliers` | GET | 供應商選單（5 分鐘 cache） |
 | `/api/translocations` | GET | 集運地點選單 |
+
+### TW 採購
+
+| Endpoint | Method | 用途 |
+|---|---|---|
+| `/api/tw/run-all` | POST | 員工一鍵（multipart 上傳）→ Phase A 比對 + Phase B 建單,全流程 |
+| `/api/tw/run` | POST | 僅 Phase A 庫存比對（multipart 上傳） |
+| `/api/tw/purchase` | POST | 僅 Phase B 分配 + 建單（管理員預覽 dry-run；排程也走此邏輯） |
 
 ### 異常紀錄
 
