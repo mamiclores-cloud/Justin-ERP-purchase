@@ -437,6 +437,7 @@
       lines.push('訂不到 ' + res.unshippable.length + ':' + res.unshippable.map((u) => String(u.key).replace(/\n/g, ' ') + '(' + u.reason + ')').join(', '));
     }
     if (res.missingPrice && res.missingPrice.length) lines.push('缺單價 ' + res.missingPrice.length + ' 項');
+    if (res.dataGaps && res.dataGaps.length) lines.push('資料缺漏 ' + res.dataGaps.length + ' 項(缺單價/盒裝缺箱 → 記 tw-data-gap)');
     appendLog(box, lines.map((t) => ({ text: t, stream: 'stdout' })));
     if (badge) setBadge(badge, 'done');
   }
@@ -969,6 +970,9 @@
     if (res.missingPrice && res.missingPrice.length) {
       html += `<p class="tw-result__cols">⚠ 有貨但缺單價 ${res.missingPrice.length} 項(影響湊低銷,建議補 sheet 單價)</p>`;
     }
+    if (res.dataGaps && res.dataGaps.length) {
+      html += `<p class="tw-result__cols">⚠ 資料缺漏 ${res.dataGaps.length} 項(已記 tw-data-gap 異常:缺單價→$0 / 盒裝缺箱,可在 02 異常 tab 查)</p>`;
+    }
     const okv = ['IL', 'HS', 'IN'].filter(v => res.posted && res.posted[v] && res.posted[v].ok);
     if (okv.length) html += `<p class="tw-result__cols">✓ 已建採購單:${okv.map(v => 'TW-' + v + ' ' + res.dateNo).join('、')}</p>`;
     box.innerHTML = html;
@@ -1077,6 +1081,9 @@
     if (res.missingPrice && res.missingPrice.length) {
       html += `<p class="tw-result__cols">⚠ 有貨但缺單價 ${res.missingPrice.length} 項(影響湊低銷,建議補 sheet 單價)</p>`;
     }
+    if (res.dataGaps && res.dataGaps.length) {
+      html += `<p class="tw-result__cols">⚠ 資料缺漏 ${res.dataGaps.length} 項(缺單價→$0 / 盒裝缺箱;execute 會記 tw-data-gap 異常)</p>`;
+    }
     if (showUnmatched) {
       if (res.unjoinedCount) {
         const s = res.unjoinedSample || [];
@@ -1084,6 +1091,9 @@
       }
       if (res.missingPrice && res.missingPrice.length) {
         html += `<details class="tw-unmatched"><summary>缺單價明細(${res.missingPrice.length})</summary><div>${res.missingPrice.map(m => escapeHtml(m.product + '(' + m.vendor + ')')).join('、')}</div></details>`;
+      }
+      if (res.dataGaps && res.dataGaps.length) {
+        html += `<details class="tw-unmatched"><summary>資料缺漏明細(${res.dataGaps.length})</summary><div>${res.dataGaps.map(g => escapeHtml(String(g.key).replace(/\n/g, ' ') + '(' + g.vendor + '):' + g.issues.join('、'))).join('<br/>')}</div></details>`;
       }
     }
     box.innerHTML = html;
