@@ -39,7 +39,7 @@
 
 ---
 
-## 系統架構（含 Indo / 1688 雙 workflow）
+## 系統架構（含 Indo / 1688 / TW 三 workflow）
 
 ```mermaid
 graph TB
@@ -47,17 +47,18 @@ graph TB
         direction TB
         CARD_INDO["<b>Indo 卡</b><br/>workflow=indo<br/>keyword=Indo, threshold=6"]
         CARD_1688["<b>1688 卡</b><br/>workflow=1688<br/>含 SKSP 共同採購"]
+        CARD_TW["<b>TW 卡(一鍵)</b><br/>workflow=tw<br/>上傳三廠商庫存(選用)"]
         STEP["<b>分步執行</b> (管理員)<br/>workflow 依 prefix 自動偵測<br/>SKSP 商品自動展開群組"]
-        ANOM_TAB["異常紀錄 tab<br/>5s polling + CSV 下載"]
-        SCHED_TAB["排程 tab<br/>每日 / 每週 / 一次性"]
+        ANOM_TAB["異常紀錄 tab<br/>5s polling + CSV(含 TW)"]
+        SCHED_TAB["排程 tab<br/>indo / 1688 / tw"]
     end
 
     subgraph Server["Node.js 後端 (port 3001)"]
-        SRV["server.js<br/>buildArgs: --workflow / --threshold / --only<br/>spawn child_process"]
+        SRV["server.js<br/>spawn child_process<br/>(purchase-create / tw-purchase)"]
         KEEP["Session keep-alive<br/>每 4 小時 ping"]
     end
 
-    subgraph CLI["purchase-create.js (child_process)"]
+    subgraph CLI["purchase-create.js (child_process) — Indo / 1688"]
         direction TB
         ENTRY["parseArgs<br/>--workflow indo / 1688"]
         ENTRY --> BRANCH{workflow?}
@@ -67,47 +68,75 @@ graph TB
         R88 --> P2["<b>Phase 2</b> SKSP 共同採購<br/>keyword=SKSP<br/>依 SKSP### 分組<br/>群組 rawSum≥3 才合單<br/><b>多商品合 1 張單</b>"]
     end
 
+    subgraph TWFLOW["tw-purchase.js (child_process) — TW"]
+        direction TB
+        TWENTRY["parseArgs --workflow tw<br/>--uploads / --use-cache"]
+        TWENTRY --> TWA["<b>Phase A</b> 庫存比對<br/>解析(本地OCR)或讀快取<br/>比對料號 → 打 v"]
+        TWA --> TWB["<b>Phase B</b> 分配 + 建單<br/>join → 低銷分配 → 一廠商一單<br/>+ 回填採購量"]
+    end
+
+    subgraph PY["tw/ Python helper (借 goods-status venv)"]
+        SM2["stock_match / sheet_dump / sheet_writeback<br/>gspread + RapidOCR(本地,不接 LLM)"]
+    end
+
     subgraph Lib["共用 Library"]
-        RULE["<b>purchase-rules.js</b><br/>純函數規則引擎<br/>• decideProduct<br/>• buildAddPayload (個別)<br/>• buildGroupAddPayload (SKSP)<br/>• getSkspCode / excludeTags<br/>• GLOBAL_EXCLUDE_TAGS (special)<br/>• GLOBAL_EXCLUDE_CODE_PREFIXES (貨號 KDS)"]
+        RULE["<b>purchase-rules.js</b><br/>Indo/1688 規則引擎<br/>• decideProduct / buildAddPayload<br/>• buildGroupAddPayload (SKSP)<br/>• GLOBAL_EXCLUDE (special / 貨號KDS)"]
+        ALLOC["<b>tw-allocate.js</b><br/>TW 跨廠商分配(純函數)<br/>6倍數 / BOX / 低銷 / 需求全訂"]
         HTTP["http-client.js<br/>180s timeout + 2 retry<br/>+ heartbeat 15s 進度"]
         SES["session.js<br/>Playwright + chrome-profile<br/>(共用 distribution-print)"]
     end
 
     subgraph State["持久化"]
-        ANOM["state/anomalies.jsonl<br/>insufficient-quantity<br/>stop-spec-skipped"]
+        ANOM["state/anomalies.jsonl<br/>insufficient-quantity / stop-spec-skipped<br/>tw-no-stock / tw-below-low-sales"]
+        TWCACHE["state/tw-stock/parsed.json<br/>TW 庫存解析快取"]
     end
 
     subgraph ERP["Ajin ERP (srv01.ajinerp.com)"]
-        PSL["GET /api/ProductOverview/ProductSpecList<br/>(60-90s 重型查詢)"]
-        ADD["POST /api/PurchaseSheet/add<br/>個別單 / SKSP 合單"]
+        PSL["GET /api/ProductOverview/ProductSpecList<br/>(60-90s 重型查詢,含 Keyword=TW)"]
+        ADD["POST /api/PurchaseSheet/add<br/>個別單 / SKSP 合單 / TW 一廠商一單"]
+    end
+
+    subgraph GSHEET["Google Sheet (TW)"]
+        GS["check stock 分頁<br/>有貨 v / 單價 / 採購量 / 需求量"]
     end
 
     CARD_INDO -.->|REST| SRV
     CARD_1688 -.->|REST| SRV
+    CARD_TW -.->|REST 上傳/一鍵| SRV
     STEP -.->|REST + --only| SRV
-    SCHED_TAB -.->|排程觸發| SRV
+    SCHED_TAB -.->|排程觸發 indo/1688/tw| SRV
     SRV -->|spawn + env PURCHASE_RUN_ID| ENTRY
+    SRV -->|spawn(--uploads / --use-cache)| TWENTRY
     RIN --> RULE
     P1 --> RULE
     P2 --> RULE
     RIN --> HTTP
     P1 --> HTTP
     P2 --> HTTP
+    TWA --> SM2
+    TWB --> SM2
+    TWB --> ALLOC
+    TWB --> HTTP
+    SM2 <-->|讀寫 v / 採購量| GS
+    SM2 <-->|快取| TWCACHE
     HTTP --> SES
-    HTTP -.->|查清單| PSL
+    HTTP -.->|查清單 / TW 需求| PSL
     HTTP -.->|建單| ADD
     RIN -.->|append| ANOM
     P1 -.->|append| ANOM
     P2 -.->|append per-group| ANOM
+    TWB -.->|append 訂不到| ANOM
     ANOM_TAB -.->|GET /api/anomalies + .csv| ANOM
     KEEP -.->|keepalive| SES
 
     classDef indo fill:#e7f0ea,stroke:#2d6a4f,color:#1d4a37
     classDef p1688 fill:#dfe9ff,stroke:#3056a8,color:#1f3a73
+    classDef tw fill:#eef2ff,stroke:#4f46e5,color:#3730a3
     classDef api fill:#fce8d5,stroke:#a05a1d,color:#5a3010
     classDef rule fill:#fff5d9,stroke:#a8851a,color:#5a4509
     class CARD_INDO,RIN indo
     class CARD_1688,R88,P1,P2 p1688
+    class CARD_TW,TWENTRY,TWA,TWB,ALLOC,SM2 tw
     class PSL,ADD api
     class RULE rule
 ```
@@ -115,6 +144,7 @@ graph TB
 **圖例**：
 - 🟢 綠色 = Indo workflow（單一商品 1 張單，threshold=6）
 - 🔵 藍色 = 1688 workflow（兩階段：廣泛 + SKSP 共同採購，threshold=3）
+- 🟣 紫色 = TW workflow（多廠商庫存比對 + 跨廠商分配 + 一廠商一單；Node + Python helper + Google Sheet）
 - 🟡 黃色 = 純函數規則引擎（共用，無 IO 副作用）
 - 🟠 橘色 = ERP API endpoint
 
@@ -124,8 +154,10 @@ graph TB
 |---|---|---|---|
 | 員工 — Indo 卡 | `#indoExecuteBtn` | `workflow=indo`（寫死）| runIndo: keyword=Indo, threshold=6 |
 | 員工 — 1688 卡 | `#t1688ExecuteBtn` | `workflow=1688`（寫死）| run1688: Phase 1 + Phase 2 |
+| 員工 — TW 卡(一鍵) | `#twAllExecuteBtn` | `workflow=tw`（寫死,multipart）| tw-purchase: Phase A 比對(上傳/快取) + Phase B 分配建單,全 execute |
+| 管理員 — TW 分配預覽 | `#twPbPreviewBtn` | `/api/tw/purchase`(dry-run) | 僅 Phase B 試算,不上傳、不建單 |
 | 管理員 — 分步執行 | `#stepPreviewBtn` / `#stepExecuteBtn` | `workflow` 依 `stepPlatformKind` OR `prefix.startsWith('1688')` 偵測 | 加 `--only MainId`；SKSP 商品時 Phase 2 只跑相關群組 |
-| 管理員 — 排程 | `#schSaveBtn` | dropdown + prefix 須一致，存到 `schedules.json` | 排程觸發時依存的 `workflow` 跑 |
+| 管理員 — 排程 | `#schSaveBtn` | dropdown(indo / 1688 / tw)，存到 `schedules.json` | 排程觸發依 `workflow` 跑；`tw` 用快取庫存(`--use-cache`) |
 
 ---
 
