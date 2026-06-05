@@ -87,7 +87,7 @@ graph TB
     end
 
     subgraph State["持久化"]
-        ANOM["state/anomalies.jsonl<br/>insufficient-quantity / stop-spec-skipped<br/>tw-no-stock / tw-below-low-sales"]
+        ANOM["state/anomalies.jsonl<br/>insufficient-quantity / stop-spec-skipped<br/>tw-no-stock / tw-below-low-sales / tw-data-gap"]
         TWCACHE["state/tw-stock/parsed.json<br/>TW 庫存解析快取"]
     end
 
@@ -106,7 +106,7 @@ graph TB
     STEP -.->|REST + --only| SRV
     SCHED_TAB -.->|排程觸發 indo/1688/tw| SRV
     SRV -->|spawn + env PURCHASE_RUN_ID| ENTRY
-    SRV -->|spawn(--uploads / --use-cache)| TWENTRY
+    SRV -->|spawn + uploads/use-cache 旗標| TWENTRY
     RIN --> RULE
     P1 --> RULE
     P2 --> RULE
@@ -156,7 +156,7 @@ graph TB
 | 員工 — 1688 卡 | `#t1688ExecuteBtn` | `workflow=1688`（寫死）| run1688: Phase 1 + Phase 2 |
 | 員工 — TW 卡(一鍵) | `#twAllExecuteBtn` | `workflow=tw`（寫死,multipart）| tw-purchase: Phase A 比對(上傳/快取) + Phase B 分配建單,全 execute |
 | 管理員 — TW 分配預覽 | `#twPbPreviewBtn` | `/api/tw/purchase`(dry-run) | 僅 Phase B 試算,不上傳、不建單 |
-| 管理員 — 分步執行 | `#stepPreviewBtn` / `#stepExecuteBtn` | `workflow` 依 `stepPlatformKind` OR `prefix.startsWith('1688')` 偵測 | 加 `--only MainId`；SKSP 商品時 Phase 2 只跑相關群組 |
+| 管理員 — 分步執行 | `#stepPreviewBtn` / `#stepExecuteBtn` | `workflow` 依 `stepPlatformKind`（indo / 1688 / **tw**）OR `prefix.startsWith('1688')` 偵測 | 加 `--only MainId`；1688 SKSP 商品時 Phase 2 只跑相關群組；**TW 走 `/api/tw/purchase --only` + `--ignore-low-sales`（單品跳低銷門檻才試算/建得出來）** |
 | 管理員 — 排程 | `#schSaveBtn` | dropdown(indo / 1688 / tw)，存到 `schedules.json` | 排程觸發依 `workflow` 跑；`tw` 用快取庫存(`--use-cache`) |
 
 ---
@@ -346,10 +346,10 @@ flowchart TD
     Cache --> WriteV
     WriteV --> Demand[ERP Keyword=TW<br/>抓需求量 + GUID]
     Demand --> Join[以 MainId #N join sheet]
-    Join --> Alloc[分配演算法<br/>6 倍數 / BOX / 補最低量<br/>低銷 IL8000 HS3000 IN5000<br/>需求全訂 · 湊不滿改別家]
+    Join --> Alloc[分配演算法<br/>6倍數/補最低量 · BOX分廠訂整箱<br/>低銷 IL8000 HS3000 IN5000<br/>需求全訂 · 湊不滿改別家 · 平手挑便宜]
     Alloc --> PO[一廠商一張採購單<br/>TW-廠商 訂單號=日期<br/>POST add]
     PO --> Back[回填 採購量 / 需求量 到 sheet]
-    Back --> Anom[訂不到 → 異常紀錄<br/>三家沒貨 / 湊不滿低銷]
+    Back --> Anom[異常紀錄<br/>訂不到:三家沒貨/湊不滿低銷<br/>+資料缺漏:缺單價/盒裝缺箱]
     Anom --> End([完成])
 
     classDef a fill:#eef2ff,stroke:#4f46e5,color:#3730a3
@@ -360,13 +360,14 @@ flowchart TD
 
 | 規則 | 說明 |
 |---|---|
-| 數量取整 | 非 BOX：`ceil(max(需求, 最低量) / 6) * 6`（補最低量後進位 6 倍數）；BOX（ERP KeyWord 含 `BOX`）：訂整箱 = `ceil(需求 / 每箱幾件) * 每箱幾件` |
-| 單價 / 金額 | 取 sheet 各廠商單價；BOX 商品「單價 ≥ 箱數視為每箱價」→ ÷ 箱數還原成每個；金額 = 每個價 × 數量 |
+| 數量取整 | 散裝（非 BOX，或 BOX 但該廠商無「每箱數量」）：`ceil(max(需求, 最低量) / 6) * 6`（補最低量後進位 6 倍數）；整箱（BOX 且該廠商有每箱數量）：`ceil(需求 / 每箱幾件) * 每箱幾件`（至少 1 箱，**不受 6 倍數影響**） |
+| 盒裝判斷 | `BOX` 是 ERP 商品層級標籤，但**成箱與否看各廠商**：有「每箱數量」才訂整箱、沒有就當散裝。每箱數量欄空時，會從第 5 欄 Price 備註的 `MIN N PCS` 推得（例 IN KFD01 一箱 = 40） |
+| 單價 / 金額 | 單價單位**依廠商**：`HS` 填每箱價 → ÷ 每箱數量還原成每個；`IL`/`IN` 填每個價。金額 = 每個價 × 數量 |
 | 低銷門檻 | IL 8000 / HS 3000 / IN 5000；廠商被分到的總金額 ≥ 低銷才出貨 |
-| 分配目標 | 需求全訂（低銷只是出貨門檻）；多家有貨 → 分給最需湊低銷者；某家湊不滿 → 改分給別家有貨；都沒人接 → 記異常 |
+| 分配目標 | 需求全訂（低銷只是出貨門檻）；多家有貨 → 分給最需湊低銷者，**平手挑每個單價最便宜**（缺價排最後）；某家湊不滿 → 改分給別家有貨；都沒人接 → 記異常 |
 | 建單 | 一廠商一張單（`TW-IL`/`TW-HS`/`TW-IN`），`PurchasePlatform=TW-廠商`、`PurchasePlatformNo=日期 MMDD` |
 | 比對 key | IL/HS = 廠商料號（後綴變體、`I↔1` OCR 容錯）；IN = barcode（濾掉 `000000…` 補零內部碼） |
-| 異常 | `tw-no-stock`（三家沒貨）/ `tw-below-low-sales`（湊不滿低銷）→ 寫 `anomalies.jsonl`，02 異常 tab 可篩 |
+| 異常 | `tw-no-stock`（三家沒貨）/ `tw-below-low-sales`（湊不滿低銷）/ `tw-data-gap`（已分配但**缺單價→$0** 或**盒裝查不到每箱數量**）→ 寫 `anomalies.jsonl`，02 異常 tab 可篩 |
 
 完整規格見 [`TW-採購規格.md`](TW-採購規格.md)。
 
