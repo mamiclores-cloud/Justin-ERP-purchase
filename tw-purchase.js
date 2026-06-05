@@ -38,6 +38,8 @@ function parseArgs() {
     maxProducts: parseInt(get('--max-products', '0'), 10) || 0,
     uploads: get('--uploads', ''),   // 有給 → 先跑 Phase A 庫存比對(寫 v)再跑 Phase B
     useCache: process.argv.includes('--use-cache'),  // 無上傳也用快取跑 Phase A(排程用)
+    only: get('--only', ''),          // 只跑指定 MainId(逗號分隔),測試用
+    ignoreLowSales: process.argv.includes('--ignore-low-sales'),  // 單品測試:跳過低銷門檻
   };
 }
 
@@ -130,12 +132,13 @@ function lookupDemand(erp, productCode) {
 }
 
 /* ---- join sheet × ERP → specs(給分配)---- */
-function buildSpecs(sheetRows, erp) {
+function buildSpecs(sheetRows, erp, onlySet) {
   const specs = [];
   const specByKey = new Map();
   const unjoined = [];      // sheet 有貨但 ERP 無需求(或無對映)
   const missingPrice = [];  // 有貨候選但缺單價
   for (const row of sheetRows) {
+    if (onlySet && !onlySet.has(mainOf(row.product))) continue;   // --only 測試過濾
     const entry = lookupDemand(erp, row.product);
     if (!entry) continue;   // 無 ERP 需求 → 這列這次不採購
     const vendors = {};
@@ -267,12 +270,12 @@ async function main() {
       log(`Phase A: ${phaseA.usedCache ? '用上次快取(免 OCR)' : '本次新解析'} · 有貨打勾 IL${phaseA.matched.IL}/HS${phaseA.matched.HS}/IN${phaseA.matched.IN},寫入 ${phaseA.written_cells || 0} 格`);
     }
   }
-  // 欄組 / 採購單日期:有跑 Phase A 用其有效日期(沒上傳則來自快取),否則用 --date
-  const effDate = (phaseA && phaseA.date) ? phaseA.date : opts.date;
-
   // 1) sheet
   const sheet = loadSheet();
-  log(`sheet 列 ${sheet.rows.length};有貨欄 ${JSON.stringify(sheet.stockCols)}`);
+  log(`sheet 列 ${sheet.rows.length};最右(最新)欄組日期 ${sheet.weekDate}`);
+
+  // 欄組 / 採購單日期:一律以 sheet「最右(最新)欄組」為準(公司預建,非執行當天)
+  const effDate = (phaseA && phaseA.date) || sheet.weekDate || opts.date;
 
   // 2) ERP TW 需求
   const { context } = await launchWithSession({ headless: !opts.headed });
@@ -294,11 +297,14 @@ async function main() {
   }
 
   // 3) join + 分配
-  const { specs, specByKey, unjoined, missingPrice } = buildSpecs(sheet.rows, erp);
+  const onlySet = opts.only ? new Set(opts.only.split(',').map((s) => mainOf(s)).filter(Boolean)) : null;
+  const { specs, specByKey, unjoined, missingPrice } = buildSpecs(sheet.rows, erp, onlySet);
   log(`join 出 ${specs.length} 個有需求規格;ERP 有需求但 sheet 無對映 ${unjoined.length}`);
-  const alloc = allocate(specs, DEFAULT_LOW_SALES);
+  const lowSales = opts.ignoreLowSales ? { IL: 0, HS: 0, IN: 0 } : DEFAULT_LOW_SALES;
+  const alloc = allocate(specs, lowSales);
+  if (opts.ignoreLowSales) log('  (單品測試模式:跳過低銷門檻)');
   for (const v of VENDORS) {
-    log(`  ${v}: ${alloc.orders[v].length} 項  金額 ${Math.round(alloc.vendorTotals[v])}  (低銷 ${DEFAULT_LOW_SALES[v]})`);
+    log(`  ${v}: ${alloc.orders[v].length} 項  金額 ${Math.round(alloc.vendorTotals[v])}  (低銷 ${lowSales[v]})`);
   }
   log(`  訂不到 ${alloc.unshippable.length}(三家沒貨/湊不滿低銷)`);
 
@@ -344,7 +350,7 @@ async function main() {
     unjoinedSample: unjoined.slice(0, 50),
     missingPrice: missingPrice.slice(0, 50),
     vendorTotals: alloc.vendorTotals,
-    lowSales: DEFAULT_LOW_SALES,
+    lowSales,
     orders: VENDORS.reduce((acc, v) => {
       acc[v] = alloc.orders[v].map((o) => ({ ...o, name: o.key }));
       return acc;

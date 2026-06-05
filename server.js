@@ -368,6 +368,8 @@ function startTwPurchaseJob(opts) {
   const args = [path.join(__dirname, 'tw-purchase.js')];
   if (opts.uploads) args.push('--uploads', String(opts.uploads));
   if (opts.useCache) args.push('--use-cache');
+  if (opts.only) args.push('--only', String(opts.only));
+  if (opts.ignoreLowSales) args.push('--ignore-low-sales');
   if (opts.date) args.push('--date', String(opts.date));
   if (opts.cardinality) args.push('--cardinality', String(opts.cardinality));
   if (opts.percent) args.push('--percent', String(opts.percent));
@@ -678,7 +680,7 @@ async function handleApi(req, res, urlPath) {
       const p = JSON.parse(body || '{}');
       const jobId = startTwPurchaseJob({
         date: p.date || '', cardinality: p.cardinality || '', percent: p.percent || '',
-        maxProducts: p.maxProducts || '', execute: !!p.execute,
+        maxProducts: p.maxProducts || '', only: p.only || '', ignoreLowSales: !!p.ignoreLowSales, execute: !!p.execute,
       });
       return jsonResp(res, 200, { jobId });
     } catch (e) {

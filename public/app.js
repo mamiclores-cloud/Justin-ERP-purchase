@@ -387,6 +387,13 @@
     });
   }
   bindPlatformKindSync('stepPlatformKind', 'stepPlatformPrefix');
+  function setStepPlatformFields() {
+    const isTw = $('#stepPlatformKind').value === 'tw';   // TW 不需平台前綴/目的地
+    if ($('#stepPrefixField')) $('#stepPrefixField').hidden = isTw;
+    if ($('#stepDestField')) $('#stepDestField').hidden = isTw;
+  }
+  $('#stepPlatformKind').addEventListener('change', setStepPlatformFields);
+  setStepPlatformFields();
 
   function buildStepParams(execute) {
     const mainId = $('#stepMainId').value.trim();
@@ -407,6 +414,33 @@
     };
   }
 
+  // 把 TW Phase B 結果摘要寫進分步執行的 log box
+  function twResultToLog(box, res, badge) {
+    if (!res) return;
+    if (res.error) {
+      appendLog(box, [{ text: '!!! ' + res.error, stream: 'stderr' }]);
+      if (badge) setBadge(badge, 'failed');
+      return;
+    }
+    const lines = [`日期 ${res.date} · 單號 ${res.dateNo} · ERP 需求 ${res.joined} 項 · ${res.mode}`];
+    ['IL', 'HS', 'IN'].forEach((v) => {
+      const os = (res.orders && res.orders[v]) || [];
+      if (!os.length) return;
+      const tot = Math.round((res.vendorTotals && res.vendorTotals[v]) || 0);
+      const low = (res.lowSales && res.lowSales[v]) || 0;
+      const posted = res.posted && res.posted[v];
+      lines.push(`${v}: ${os.length} 項 / $${tot}(低銷 ${low})` +
+        (posted ? (posted.ok ? ' ✓ 已建單 ' + (posted.guid || '') : ' !!! 建單失敗 ' + (posted.err || posted.status || '')) : ''));
+      os.forEach((o) => lines.push(`   ${String(o.key).replace(/\n/g, ' ')} = ${o.qty} 個 / $${o.amount}`));
+    });
+    if (res.unshippable && res.unshippable.length) {
+      lines.push('訂不到 ' + res.unshippable.length + ':' + res.unshippable.map((u) => String(u.key).replace(/\n/g, ' ') + '(' + u.reason + ')').join(', '));
+    }
+    if (res.missingPrice && res.missingPrice.length) lines.push('缺單價 ' + res.missingPrice.length + ' 項');
+    appendLog(box, lines.map((t) => ({ text: t, stream: 'stdout' })));
+    if (badge) setBadge(badge, 'done');
+  }
+
   function stepRunnerFactory(mode, badgeId, logId) {
     return () => {
       const mainId = $('#stepMainId').value.trim();
@@ -416,12 +450,33 @@
         return;
       }
       const execute = (mode === 'execute');
+      const box = $('#' + logId), badge = $('#' + badgeId);
+
+      // TW 分步:走 /api/tw/purchase --only(Phase B,用 sheet 現有有貨試算/建單)
+      if ($('#stepPlatformKind').value === 'tw') {
+        if (activeJobId) { alert('已有任務執行中,請先停止或等待完成'); return; }
+        if (execute && !confirm(`即將在【正式 ERP】建立 ${mainId} 的 TW 採購單(真單,事後要去 ERP 刪),確定?`)) return;
+        box.textContent = '';
+        appendLog(box, [{ text: `[client] TW 分步 ${execute ? '建單 (EXECUTE)' : '預覽 (DRY-RUN)'} — only ${mainId}`, stream: 'stdout' }]);
+        setRunButtonsEnabled(false); stopJobBtn.hidden = false; setBadge(badge, 'running');
+        fetch('/api/tw/purchase', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ only: mainId, ignoreLowSales: true, cardinality: $('#stepCardinality').value, percent: $('#stepPercent').value, execute }),
+        }).then((r) => r.json()).then((data) => {
+          if (!data.jobId) throw new Error(data.error || 'TW 失敗');
+          activeJobId = data.jobId;
+          pollTwJob(box, (res) => twResultToLog(box, res, badge));
+        }).catch((e) => { appendLog(box, [{ text: '[client error] ' + e.message, stream: 'stderr' }]); finishJob('failed', badge); });
+        return;
+      }
+
+      // Indo / 1688 分步(原邏輯)
       const params = buildStepParams(execute);
       if (execute) {
         if (!params.platform) { alert('採購平台不可空'); return; }
         if (!confirm(`即將在 ERP 建立 ${mainId} 的採購單,確定?`)) return;
       }
-      startJob(params, { box: $('#' + logId), badge: $('#' + badgeId) });
+      startJob(params, { box, badge });
     };
   }
   $('#stepPreviewBtn').addEventListener('click', stepRunnerFactory('preview', 'stepPreviewBadge', 'stepPreviewLog'));

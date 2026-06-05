@@ -602,6 +602,7 @@
               <select class="input" id="stepPlatformKind">
                 <option value="indo" selected>Indo</option>
                 <option value="1688">1688</option>
+                <option value="tw">TW(單一貨號試算 / 建單)</option>
               </select>
             </div>
             <div class="field">
@@ -619,11 +620,11 @@
               <label class="field__label">倍率 <span class="field__hint">(%)</span></label>
               <input class="input" type="number" id="stepPercent" value="150" min="1" max="999" />
             </div>
-            <div class="field">
+            <div class="field" id="stepPrefixField">
               <label class="field__label">採購平台前綴</label>
               <input class="input" type="text" id="stepPlatformPrefix" value="indo-" />
             </div>
-            <div class="field">
+            <div class="field" id="stepDestField">
               <label class="field__label">寄送目的地</label>
               <input class="input" type="text" id="stepPlatformDest" list="destList" value="Office" />
             </div>

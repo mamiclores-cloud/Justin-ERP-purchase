@@ -47,14 +47,11 @@ def main():
         c = col(f"{v} product code")
         base[v] = {"code": c, "price": c + 1, "box": c + 2, "min": c + 3}
 
-    # 各廠商「最新(最右)」有庫存欄
-    stockcol = {}
-    for i, h in enumerate(header):
-        norm = str(h or "").replace(" ", "").replace("\n", "")
-        if "有庫存" in norm:
-            for v in VENDORS:
-                if v in norm:
-                    stockcol[v] = i      # 後者(較右)覆蓋 → 最新
+    # 各廠商「最新(最右)」有庫存欄 — 用共用 find_latest_week(只認最右欄組,不新增)
+    from sheet_write import find_latest_week
+    week = find_latest_week(header)
+    week_date = week["date"] if week else None
+    stockcol = {v: (week["cols"].get((v, "有庫存")) if week else None) for v in VENDORS}
 
     rows = []
     for r in grid[1:]:
@@ -65,8 +62,8 @@ def main():
         for v in VENDORS:
             b = base[v]
             code = str(r[b["code"]] if 0 <= b["code"] < len(r) else "").strip()
-            sc = stockcol.get(v, -1)
-            has = sc >= 0 and sc < len(r) and str(r[sc]).strip().lower() == "v"
+            sc = stockcol.get(v)
+            has = sc is not None and sc < len(r) and str(r[sc]).strip().lower() == "v"
             vd[v] = {
                 "code": code,
                 "hasStock": has,
@@ -78,7 +75,8 @@ def main():
 
     out = {
         "rows": rows,
-        "stockCols": {v: (str(header[stockcol[v]]).replace("\n", " ") if v in stockcol else None) for v in VENDORS},
+        "weekDate": week_date,
+        "stockCols": {v: (str(header[stockcol[v]]).replace("\n", " ") if stockcol.get(v) is not None else None) for v in VENDORS},
     }
     print(json.dumps(out, ensure_ascii=False))
 

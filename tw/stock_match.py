@@ -1,15 +1,17 @@
 #!/usr/bin/env python
-# tw/stock_match.py — Phase A:三廠商庫存檔 → 比對 → 寫 v
+# tw/stock_match.py — Phase A:三廠商庫存檔 → 比對 → 在「最右(最新)欄組」打 v
 #
-# 用法:python stock_match.py [--uploads <dir>] [--date YY/MM/DD] [--execute]
+# 用法:python stock_match.py [--uploads <dir>] [--execute]
 #   uploads 目錄結構:<dir>/IL/*  <dir>/HS/*  <dir>/IN/*(各廠商子資料夾,可空 / 可不給)
 #
-# 「每週才更新一次庫存」的快取邏輯:
-#   - 某廠商這次「有上傳檔」→ 解析(含 OCR)→ 更新該廠商快取。
-#   - 某廠商這次「沒上傳」  → 沿用上次快取(不再 OCR)。
-#   - 完全沒上傳            → 全用快取(沒快取則報錯,請先上傳一次)。
-#   快取:state/tw-stock/parsed.json = { date, vendors: {IL:[...], HS:[...], IN:[...]} }
-#   有效日期:有新上傳 = 今天(--date);全用快取 = 快取裡的日期(維持同一週欄組)。
+# ★ 欄位由公司預先建好(最新日期在最右);本工具【絕不新增欄】,只往最右那組
+#   「有庫存」欄打 v。日期取自該欄組 header(不是執行當天)。
+#
+# 「每週才更新一次庫存」的快取邏輯(只影響「是否重新 OCR」,不影響欄位日期):
+#   - 某廠商有上傳檔 → 解析(含 OCR)→ 更新該廠商快取。
+#   - 某廠商沒上傳   → 沿用上次快取(不再 OCR)。
+#   - 完全沒上傳     → 全用快取(沒快取則報錯)。
+#   快取:state/tw-stock/parsed.json = { vendors: {IL:[...], HS:[...], IN:[...]} }
 import sys
 import os
 import json
@@ -45,19 +47,14 @@ def load_cache():
         return None
 
 
-def save_cache(date, vendor_sets):
+def save_cache(vendor_sets):
     os.makedirs(CACHE_DIR, exist_ok=True)
-    data = {
-        "date": date,
-        "savedAt": today_str(),
-        "vendors": {v: sorted(vendor_sets.get(v, set())) for v in VENDORS},
-    }
+    data = {"savedAt": today_str(), "vendors": {v: sorted(vendor_sets.get(v, set())) for v in VENDORS}}
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
 
 def find_unmatched(vendor, ids, rows):
-    """廠商檔有、但 sheet 對不上的識別碼 → 資料維護提示。IN 不列(完整目錄)。"""
     if vendor == "IN":
         return []
     sheet_ids = set()
@@ -70,20 +67,23 @@ def find_unmatched(vendor, ids, rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--uploads", default="", help="廠商檔根目錄(內含 IL/ HS/ IN/;可空 = 用快取)")
-    ap.add_argument("--date", default=None)
+    ap.add_argument("--uploads", default="")
+    ap.add_argument("--date", default=None)        # 保留相容,實際日期取自 sheet 最右欄組
     ap.add_argument("--execute", action="store_true")
     args = ap.parse_args()
-    date = args.date or today_str()
 
     ws = M.open_check_stock()
     idx, rows = M.read_rows(ws)
-    log(f"[A] 有效規格列 {len(rows)}")
+    header = ws.row_values(1)
+    week = W.find_latest_week(header)
+    if not week:
+        print(json.dumps({"error": "sheet 找不到當週欄組(請公司先建立『有庫存 / 採購量』欄)"}, ensure_ascii=False))
+        sys.exit(1)
+    eff_date = week["date"]
+    log(f"[A] 有效規格列 {len(rows)};最右欄組日期 {eff_date}")
 
     cache = load_cache()
-    vendor_sets = {}
-    src = {}                 # 每家來源:upload / cache / none
-    any_upload = False
+    vendor_sets, src, any_upload = {}, {}, False
     for v in VENDORS:
         folder = os.path.join(args.uploads, v) if args.uploads else ""
         files = list_input_files(folder) if (folder and os.path.isdir(folder)) else []
@@ -100,15 +100,13 @@ def main():
             src[v] = "none"
 
     if any_upload:
-        eff_date = date
-        save_cache(eff_date, vendor_sets)        # 有上傳的覆蓋、沒上傳的沿用 → 存新快取
-        log(f"[A] 更新庫存快取(日期 {eff_date})")
+        save_cache(vendor_sets)
+        log("[A] 更新庫存快取(有上傳的覆蓋、沒上傳的沿用)")
+    elif not cache:
+        print(json.dumps({"error": "尚無庫存資料:請先上傳一次三廠商庫存檔。"}, ensure_ascii=False))
+        sys.exit(1)
     else:
-        if not cache:
-            print(json.dumps({"error": "尚無庫存資料:請先上傳一次三廠商庫存檔。"}, ensure_ascii=False))
-            sys.exit(1)
-        eff_date = cache.get("date") or date
-        log(f"[A] 沒有新上傳 → 用上次快取(日期 {eff_date},免 OCR)")
+        log("[A] 沒有新上傳 → 全用上次快取(免 OCR)")
 
     have, unmatched = {}, {}
     for v in VENDORS:
@@ -116,11 +114,19 @@ def main():
         unmatched[v] = find_unmatched(v, vendor_sets[v], rows)
         log(f"[A] {v}: 來源={src[v]} 識別碼 {len(vendor_sets[v])} / 命中 {len(have[v])} 列")
 
-    plan = W.build_plan(ws, eff_date, have)
+    # 只往最右那組「有庫存」欄打 v(不新增欄)
     written = 0
+    missing_cols = [v for v in VENDORS if week["cols"].get((v, "有庫存")) is None]
     if args.execute:
-        written = W.apply_plan(ws, plan)
-        log(f"[A] 寫入 {written} 格")
+        triples = []
+        for v in VENDORS:
+            ci = week["cols"].get((v, "有庫存"))
+            if ci is None:
+                continue
+            for rownum in sorted(have[v]):
+                triples.append((rownum, ci + 1, "v"))
+        written = W.apply_cells(ws, triples)
+        log(f"[A] 寫入 {written} 格(打 v)到 {eff_date} 欄組")
     else:
         log("[A] dry-run(未寫入)")
 
@@ -133,8 +139,7 @@ def main():
         "matched": {v: len(have[v]) for v in VENDORS},
         "unmatched_count": {v: len(unmatched[v]) for v in VENDORS},
         "unmatched_sample": {v: unmatched[v][:50] for v in VENDORS},
-        "new_columns": [t for (_c, t) in plan["new_headers"]],
-        "reused_week_group": plan["reused"],
+        "missing_stock_cols": missing_cols,    # 該日期欄組缺哪幾家的「有庫存」欄
         "written_cells": written,
     }
     print(json.dumps(result, ensure_ascii=False))
