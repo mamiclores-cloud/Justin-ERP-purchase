@@ -43,6 +43,46 @@ def find_latest_week(header):
     return {"date": latest_date, "cols": cols}
 
 
+def ensure_today_group(ws, today):
+    """確保有一組『日期=today』的欄(IL/HS/IN × 有庫存/採購量 + 建單日期)在『需求量』左邊。
+    『需求量』(紫)為單一最右欄,順便把它的日期改成 today。
+    同一天已建 → 不重複插入(冪等)。回 find_latest_week(更新後) 結果;sheet 無『需求量』欄回 None。"""
+    header = ws.row_values(1)
+    demand_idx = None
+    for i, h in enumerate(header):
+        if "需求量" in _norm(h):
+            demand_idx = i                       # 取最右(需求量為單一欄)
+    if demand_idx is None:
+        return None
+
+    has_today = any(
+        ("有庫存" in _norm(h)) and (str(h).split("\n")[0].strip() == today)
+        for h in header if str(h).strip()
+    )
+    if not has_today:
+        new_cols = []                            # 順序同既有欄組:IL/HS/IN × 有庫存/採購量,末尾建單日期
+        for v in VENDORS:
+            new_cols.append([u"%s\n%s\n有庫存" % (today, v)])
+            new_cols.append([u"%s\n%s\n採購量" % (today, v)])
+        new_cols.append([u"%s\n建單日期" % today])
+        ws.insert_cols(new_cols, col=demand_idx + 1, value_input_option="USER_ENTERED")
+        header = ws.row_values(1)                # 插欄後右移,重抓需求量位置
+        demand_idx = None
+        for i, h in enumerate(header):
+            if "需求量" in _norm(h):
+                demand_idx = i
+
+    want = u"%s\n需求量" % today                  # 需求量日期 → today(永遠最右)
+    if str(ws.cell(1, demand_idx + 1).value) != want:
+        ws.update_cell(1, demand_idx + 1, want)
+        header = ws.row_values(1)
+
+    res = find_latest_week(header)
+    if res is not None:
+        res["createdToday"] = not has_today
+    return res
+
+
 def apply_cells(ws, triples, value_input_option="USER_ENTERED"):
     """triples: [(row1based, col1based, value)] → 一次 batch 寫入。回寫入格數。
     value_input_option:數字用 USER_ENTERED;建單日期等文字用 RAW(避免被當日期重新解析)。"""

@@ -4,8 +4,9 @@
 # 用法:python stock_match.py [--uploads <dir>] [--execute]
 #   uploads 目錄結構:<dir>/IL/*  <dir>/HS/*  <dir>/IN/*(各廠商子資料夾,可空 / 可不給)
 #
-# ★ 欄位由公司預先建好(最新日期在最右);本工具【絕不新增欄】,只往最右那組
-#   「有庫存」欄打 v。日期取自該欄組 header(不是執行當天)。
+# ★ execute 時:程式自己在『需求量』(紫,單一最右欄)左邊新增一組「執行當天」日期的欄
+#   (IL/HS/IN×有庫存/採購量 + 建單日期),把 v 打進當天「有庫存」欄;同一天重跑不重建。
+#   dry-run 不動 sheet,只讀最右組。需求量永遠維持在最右、日期同步成今天。
 #
 # 「每週才更新一次庫存」的快取邏輯(只影響「是否重新 OCR」,不影響欄位日期):
 #   - 某廠商有上傳檔 → 解析(含 OCR)→ 更新該廠商快取。
@@ -74,13 +75,15 @@ def main():
 
     ws = M.open_check_stock()
     idx, rows = M.read_rows(ws)
-    header = ws.row_values(1)
-    week = W.find_latest_week(header)
+    if args.execute:
+        week = W.ensure_today_group(ws, today_str())   # 建當天欄組(於需求量左、需求量日期改今天),同日不重建
+    else:
+        week = W.find_latest_week(ws.row_values(1))     # dry-run 不動 sheet,只讀最右組
     if not week:
-        print(json.dumps({"error": "sheet 找不到當週欄組(請公司先建立『有庫存 / 採購量』欄)"}, ensure_ascii=False))
+        print(json.dumps({"error": "sheet 找不到『需求量』欄(請確認副本格式)"}, ensure_ascii=False))
         sys.exit(1)
     eff_date = week["date"]
-    log(f"[A] 有效規格列 {len(rows)};最右欄組日期 {eff_date}")
+    log(f"[A] 有效規格列 {len(rows)};{'當天新欄組' if args.execute else '最右欄組'}日期 {eff_date}{'(本次新建)' if week.get('createdToday') else ''}")
 
     cache = load_cache()
     vendor_sets, src, any_upload = {}, {}, False
@@ -141,6 +144,7 @@ def main():
         "unmatched_sample": {v: unmatched[v][:50] for v in VENDORS},
         "missing_stock_cols": missing_cols,    # 該日期欄組缺哪幾家的「有庫存」欄
         "written_cells": written,
+        "groupCreated": bool(week.get("createdToday")),
     }
     print(json.dumps(result, ensure_ascii=False))
 

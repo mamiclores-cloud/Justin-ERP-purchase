@@ -947,7 +947,7 @@
     const a = res.phaseA;
     let html = `<div class="tw-result__head"><span class="badge" style="background:#fef2f2;color:#b91c1c;">EXECUTE</span> <b>${escapeHtml(res.date || '')}</b> · 單號 ${escapeHtml(res.dateNo || '')} · ERP 需求 ${res.joined} 項</div>`;
     if (a && a.matched) {
-      html += `<p class="tw-result__cols">① 庫存比對${a.usedCache ? '<b>(沿用上次庫存)</b>' : ''}:有貨打勾 IL <code>${a.matched.IL}</code> / HS <code>${a.matched.HS}</code> / IN <code>${a.matched.IN}</code>(寫入 ${a.written_cells || 0} 格)</p>`;
+      html += `<p class="tw-result__cols">① 庫存比對${a.usedCache ? '<b>(沿用上次庫存)</b>' : ''}${a.groupCreated ? '<b>(已建當天欄組)</b>' : ''}:有貨打勾 IL <code>${a.matched.IL}</code> / HS <code>${a.matched.HS}</code> / IN <code>${a.matched.IN}</code>(寫入 ${a.written_cells || 0} 格)</p>`;
     }
     html += '<div class="tw-result__grid">';
     ['IL', 'HS', 'IN'].forEach(v => {
@@ -961,7 +961,7 @@
       html += `<div class="tw-stat"><span class="tw-stat__v">${n}</span><span class="tw-stat__k">${v} 採購單 ${tag}</span><small>金額 ${total} / 低銷 ${low}</small></div>`;
     });
     html += '</div>';
-    if (res.writeback) html += `<p class="tw-result__cols">② 回填 sheet:${res.writeback.written_cells || 0} 格(需求量 / 採購量 / 建單日期 ${escapeHtml(res.writeback.buildDate || '')})${res.writeback.buildDateColCreated ? ' · 已自動新增「建單日期」欄' : ''}</p>`;
+    if (res.writeback) html += `<p class="tw-result__cols">② 回填 sheet:${res.writeback.written_cells || 0} 格(需求量 / 採購量 / 建單日期 ${escapeHtml(res.writeback.buildDate || '')})</p>`;
     if (res.unshippable && res.unshippable.length) {
       const noStock = res.unshippable.filter(u => u.reason === 'no-stock').length;
       const below = res.unshippable.filter(u => u.reason === 'below-low-sales').length;

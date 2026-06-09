@@ -304,7 +304,7 @@ async function main() {
     log(`=== Phase A 庫存比對(${opts.execute ? 'execute 寫 v' : 'dry-run'})===`);
     phaseA = runStockMatch(opts.uploads, opts.date, opts.execute);
     if (phaseA && phaseA.matched) {
-      log(`Phase A: ${phaseA.usedCache ? '用上次快取(免 OCR)' : '本次新解析'} · 有貨打勾 IL${phaseA.matched.IL}/HS${phaseA.matched.HS}/IN${phaseA.matched.IN},寫入 ${phaseA.written_cells || 0} 格`);
+      log(`Phase A: ${phaseA.usedCache ? '用上次快取(免 OCR)' : '本次新解析'}${phaseA.groupCreated ? ' · 已建當天欄組' : ''} · 有貨打勾 IL${phaseA.matched.IL}/HS${phaseA.matched.HS}/IN${phaseA.matched.IN},寫入 ${phaseA.written_cells || 0} 格`);
     }
   }
   // 1) sheet
@@ -362,7 +362,7 @@ async function main() {
     try {
       log('回填 sheet(需求量 / 採購量)...');
       writeback = writeBackToSheet(effDate, specs, alloc);
-      log(`  回填 ${writeback.written_cells} 格(${writeback.rows} 列)· 建單日期 ${writeback.buildDate || ''}${writeback.buildDateColCreated ? '(已自動新增欄)' : ''}`);
+      log(`  回填 ${writeback.written_cells} 格(${writeback.rows} 列)· 建單日期 ${writeback.buildDate || ''}`);
       for (const v of Object.keys(po)) {
         log(`POST 建單 TW-${v} ${dateNoOf(effDate)}(${po[v].itemView.length} 規格)...`);
         const r = await api.Purchase.add(po[v]);

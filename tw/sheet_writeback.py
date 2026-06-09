@@ -32,15 +32,7 @@ def main():
         print(json.dumps({"error": "sheet 找不到當週欄組(請公司先建立『採購量 / 需求量』欄)"}, ensure_ascii=False))
         sys.exit(1)
 
-    # 自動確保「建單日期」欄:沒有就在「需求量」左邊插入一欄(自動化程序自己加,只此欄例外)。
-    created_col = False
-    if build_date and (None, "建單日期") not in week["cols"] and (None, "需求量") in week["cols"]:
-        demand_col_1b = week["cols"][(None, "需求量")] + 1
-        ws.insert_cols([[u"%s\n建單日期" % week["date"]]], col=demand_col_1b,
-                       value_input_option="USER_ENTERED")
-        created_col = True
-        header = ws.row_values(1)          # 插欄後欄位右移,重抓 header 重新定位
-        week = find_latest_week(header)
+    # 欄組(含建單日期欄)由 Phase A 的 ensure_today_group 建立;這裡只寫值,不再插欄。
     cols = week["cols"]
 
     # product code → sheet 列號(1-based)
@@ -77,7 +69,6 @@ def main():
     print(json.dumps({
         "date": week["date"],
         "buildDate": build_date,
-        "buildDateColCreated": created_col,
         "written_cells": written,
         "rows": written_rows,
         "missing_cols": [k for k in [("IL", "採購量"), ("HS", "採購量"), ("IN", "採購量"), (None, "需求量")] if cols.get(k) is None],
