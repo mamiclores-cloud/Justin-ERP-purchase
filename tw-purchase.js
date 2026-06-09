@@ -8,7 +8,9 @@
 //   4. dry-run:印計畫 + 輸出結果 JSON;--execute:POST /api/PurchaseSheet/add 一廠商一單
 //
 // 用法:node tw-purchase.js [--date YY/MM/DD] [--cardinality SalesCount90] [--percent 150]
-//                          [--max-products N] [--execute] [--debug]
+//                          [--max-products N] [--execute] [--no-post] [--debug]
+//   --no-post:彩排模式 — 做完整 sheet 寫入(建當天欄組 / 打 v / 回填採購量+需求量+建單日期)
+//             但【不 POST ERP 建單、不寫異常 log】,用來在副本驗證欄位/數字,不產生真單。
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -40,6 +42,7 @@ function parseArgs() {
     useCache: process.argv.includes('--use-cache'),  // 無上傳也用快取跑 Phase A(排程用)
     only: get('--only', ''),          // 只跑指定 MainId(逗號分隔),測試用
     ignoreLowSales: process.argv.includes('--ignore-low-sales'),  // 單品測試:跳過低銷門檻
+    noPost: process.argv.includes('--no-post'),  // 彩排:做完整 sheet 寫入(建欄/v/回填)但不 POST ERP 建單、不寫異常 log
   };
 }
 
@@ -363,18 +366,26 @@ async function main() {
       log('回填 sheet(需求量 / 採購量)...');
       writeback = writeBackToSheet(effDate, specs, alloc);
       log(`  回填 ${writeback.written_cells} 格(${writeback.rows} 列)· 建單日期 ${writeback.buildDate || ''}`);
-      for (const v of Object.keys(po)) {
-        log(`POST 建單 TW-${v} ${dateNoOf(effDate)}(${po[v].itemView.length} 規格)...`);
-        const r = await api.Purchase.add(po[v]);
-        const ok = r && r.Status === 'Success';
-        posted[v] = { ok, guid: r && (r.PurchaseSheetGUID || r.GUID), status: r && r.Status, err: r && r.ErrorMessage };
-        log(`  ${ok ? '✓ ' + (posted[v].guid || '') : '!!! ' + (posted[v].err || posted[v].status)}`);
+      if (opts.noPost) {
+        log(`(--no-post 彩排:跳過 ERP 建單 POST,${Object.keys(po).length} 張單未送)`);
+      } else {
+        for (const v of Object.keys(po)) {
+          log(`POST 建單 TW-${v} ${dateNoOf(effDate)}(${po[v].itemView.length} 規格)...`);
+          const r = await api.Purchase.add(po[v]);
+          const ok = r && r.Status === 'Success';
+          posted[v] = { ok, guid: r && (r.PurchaseSheetGUID || r.GUID), status: r && r.Status, err: r && r.ErrorMessage };
+          log(`  ${ok ? '✓ ' + (posted[v].guid || '') : '!!! ' + (posted[v].err || posted[v].status)}`);
+        }
       }
     } finally {
       await context.close();
     }
-    anomaliesWritten = appendTwAnomalies(alloc.unshippable, opts) + appendTwDataAnomalies(dataGaps, opts);
-    log(`異常紀錄 +${anomaliesWritten}(訂不到 ${alloc.unshippable.length} / 資料異常 ${dataGaps.length})`);
+    if (!opts.noPost) {
+      anomaliesWritten = appendTwAnomalies(alloc.unshippable, opts) + appendTwDataAnomalies(dataGaps, opts);
+      log(`異常紀錄 +${anomaliesWritten}(訂不到 ${alloc.unshippable.length} / 資料異常 ${dataGaps.length})`);
+    } else {
+      log(`(--no-post 彩排:不寫異常 log;訂不到 ${alloc.unshippable.length} / 資料異常 ${dataGaps.length} 見結果 JSON)`);
+    }
   } else {
     await context.close();
   }
