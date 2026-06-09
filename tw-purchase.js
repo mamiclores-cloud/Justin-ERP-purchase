@@ -226,15 +226,12 @@ function writeBackToSheet(dateStr, specs, alloc) {
     const a = vendorByKey[s.key];
     return { product: s.key, demand: s.demand, vendorQty: a ? { [a.v]: a.qty } : {} };
   });
-  const pad = (n) => String(n).padStart(2, '0');
-  const now = new Date();
-  const buildDate = `${pad(now.getFullYear() % 100)}/${pad(now.getMonth() + 1)}/${pad(now.getDate())}`;  // 建單日期=執行當天
   const secrets = JSON.parse(fs.readFileSync(path.join(__dirname, 'tw', 'tw_secrets.json'), 'utf8'));
   const py = process.env.TW_PYTHON || secrets.python_exe || 'python';
   const r = spawnSync(py, [path.join(__dirname, 'tw', 'sheet_writeback.py')], {
     cwd: __dirname, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    input: JSON.stringify({ date: dateStr, buildDate, rows }),
+    input: JSON.stringify({ date: dateStr, rows }),
   });
   if (r.status !== 0) throw new Error('sheet_writeback 失敗: ' + (r.stderr || r.error || '').toString().slice(0, 300));
   try { return JSON.parse(r.stdout); } catch { return { raw: String(r.stdout).slice(0, 200) }; }
@@ -365,7 +362,7 @@ async function main() {
     try {
       log('回填 sheet(需求量 / 採購量)...');
       writeback = writeBackToSheet(effDate, specs, alloc);
-      log(`  回填 ${writeback.written_cells} 格(${writeback.rows} 列)· 建單日期 ${writeback.buildDate || ''}`);
+      log(`  回填 ${writeback.written_cells} 格(${writeback.rows} 列)`);
       if (opts.noPost) {
         log(`(--no-post 彩排:跳過 ERP 建單 POST,${Object.keys(po).length} 張單未送)`);
       } else {

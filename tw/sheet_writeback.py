@@ -23,7 +23,6 @@ def norm(s):
 def main():
     data = json.loads((sys.stdin.read() or "{}").lstrip("﻿"))   # 容忍可能的 UTF-8 BOM
     rows_in = data.get("rows") or []
-    build_date = data.get("buildDate")   # 執行當天(建單日期);None 則不寫建單日期
 
     ws = M.open_check_stock()
     header = ws.row_values(1)
@@ -32,7 +31,7 @@ def main():
         print(json.dumps({"error": "sheet 找不到當週欄組(請公司先建立『採購量 / 需求量』欄)"}, ensure_ascii=False))
         sys.exit(1)
 
-    # 欄組(含建單日期欄)由 Phase A 的 ensure_today_group 建立;這裡只寫值,不再插欄。
+    # 欄組由 Phase A 的 ensure_today_group 建立;這裡只寫值,不插欄。
     cols = week["cols"]
 
     # product code → sheet 列號(1-based)
@@ -45,8 +44,7 @@ def main():
         if p and p != "-":
             prod_row.setdefault(norm(p), idx + 1)
 
-    num_triples = []     # 需求量 + 採購量(數字 → USER_ENTERED)
-    date_triples = []    # 建單日期(文字 → RAW,避免被當日期解析)
+    triples = []         # 需求量 + 採購量(數字)
     written_rows = 0
     missing = []
     for r in rows_in:
@@ -55,20 +53,16 @@ def main():
             missing.append(r.get("product"))
             continue
         if r.get("demand") is not None and cols.get((None, "需求量")) is not None:
-            num_triples.append((rn, cols[(None, "需求量")] + 1, str(r["demand"])))
+            triples.append((rn, cols[(None, "需求量")] + 1, str(r["demand"])))
         vq = r.get("vendorQty") or {}
         for v in VENDORS:
             if vq.get(v) and cols.get((v, "採購量")) is not None:
-                num_triples.append((rn, cols[(v, "採購量")] + 1, str(vq[v])))
-        # 建單日期:有被分配建單(vendorQty 非空)的列才寫
-        if build_date and vq and cols.get((None, "建單日期")) is not None:
-            date_triples.append((rn, cols[(None, "建單日期")] + 1, str(build_date)))
+                triples.append((rn, cols[(v, "採購量")] + 1, str(vq[v])))
         written_rows += 1
 
-    written = apply_cells(ws, num_triples) + apply_cells(ws, date_triples, value_input_option="RAW")
+    written = apply_cells(ws, triples)
     print(json.dumps({
         "date": week["date"],
-        "buildDate": build_date,
         "written_cells": written,
         "rows": written_rows,
         "missing_cols": [k for k in [("IL", "採購量"), ("HS", "採購量"), ("IN", "採購量"), (None, "需求量")] if cols.get(k) is None],

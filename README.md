@@ -280,7 +280,7 @@ flowchart TD
 
 TW 跟 Indo / 1688 **本質不同**：不是 per-product 建單，而是把「三家廠商（IL / HS / IN）當週有什麼貨」對上「ERP 算出的需求量」，在**滿足各廠商低銷金額**下，把每個規格的需求量分配給有貨廠商，最後**依廠商各開一張採購單**。分兩個子系統：
 
-- **子系統 A — 庫存比對**：上傳三廠商庫存檔（IL=Excel+照片 / HS=PDF / IN=Excel；圖片 / Excel / CSV / PDF 皆可、可多檔）→ 解析（含**本地 RapidOCR**，不接 LLM）→ 比對 supplier sheet 料號（IL/HS 比料號、IN 比 barcode）→ **程式自動在「需求量」(紫,單一最右欄)左邊新增一組「執行當天」日期的欄（IL/HS/IN×有庫存/採購量 + 建單日期），把 `v` 打進當天「有庫存」欄（同一天重跑不重建）**。
+- **子系統 A — 庫存比對**：上傳三廠商庫存檔（IL=Excel+照片 / HS=PDF / IN=Excel；圖片 / Excel / CSV / PDF 皆可、可多檔）→ 解析（含**本地 RapidOCR**，不接 LLM）→ 比對 supplier sheet 料號（IL/HS 比料號、IN 比 barcode）→ **程式自動在「需求量」(紫,單一最右欄)左邊新增一組「執行當天」日期的欄（IL/HS/IN×有庫存/採購量,依廠商上色 IL綠/HS紅/IN藍），把 `v` 打進當天「有庫存」欄（同一天重跑不重建）**。
 - **子系統 B — 分配 + 建單**：ERP（`Keyword=TW`）抓需求量 → 以 `MainId #N` join sheet → 分配演算法 → 一廠商一張採購單 POST ERP ＋ 回填採購量 ＋ 異常紀錄。
 
 > **架構**：Node 主導（UI / job / ERP / 建單）＋ Python helper（`tw/`：Google Sheet 讀寫 + 檔案解析 + RapidOCR）。Python 借用 sister 專案 `Justin-goods-status` 的 venv ＋ service account 金鑰（設定在 `tw/tw_secrets.json`，gitignore）。
@@ -348,7 +348,7 @@ flowchart TD
     Demand --> Join[以 MainId #N join sheet]
     Join --> Alloc[分配演算法<br/>6倍數/補最低量 · BOX分廠訂整箱<br/>低銷 IL8000 HS3000 IN5000<br/>需求全訂 · 湊不滿改別家 · 平手挑便宜]
     Alloc --> PO[一廠商一張採購單<br/>TW-廠商 訂單號=日期<br/>POST add]
-    PO --> Back[回填 採購量 / 需求量 / 建單日期 到 sheet]
+    PO --> Back[回填 採購量 / 需求量 到 sheet]
     Back --> Anom[異常紀錄<br/>訂不到:三家沒貨/湊不滿低銷<br/>+資料缺漏:缺單價/盒裝缺箱]
     Anom --> End([完成])
 
@@ -366,7 +366,7 @@ flowchart TD
 | 低銷門檻 | IL 8000 / HS 3000 / IN 5000；廠商被分到的總金額 ≥ 低銷才出貨 |
 | 分配目標 | 需求全訂（低銷只是出貨門檻）；多家有貨 → 分給最需湊低銷者，**平手挑每個單價最便宜**（缺價排最後）；某家湊不滿 → 改分給別家有貨；都沒人接 → 記異常 |
 | 建單 | 一廠商一張單（`TW-IL`/`TW-HS`/`TW-IN`），`PurchasePlatform=TW-廠商`、`PurchasePlatformNo=日期 MMDD` |
-| 建欄 / 回填 | **每次 execute 程式自己建欄**：在「需求量」(紫,單一最右欄)左側新增一組「**執行當天**」日期的欄（IL/HS/IN×有庫存/採購量 + 建單日期），同一天重跑不重建。Phase A 打 `v`、Phase B 寫 採購量 + 建單日期(執行當天)，並把「需求量」日期同步成當天、寫入需求量值 |
+| 建欄 / 回填 | **每次 execute 程式自己建欄**：在「需求量」(紫,單一最右欄)左側新增一組「**執行當天**」日期的欄（IL/HS/IN×有庫存/採購量），依廠商上色(IL綠/HS紅/IN藍),同一天重跑不重建。Phase A 打 `v`、Phase B 寫 採購量,並把「需求量」日期同步成當天、寫入需求量值 |
 | 比對 key | IL/HS = 廠商料號（後綴變體、`I↔1` OCR 容錯）；IN = barcode（濾掉 `000000…` 補零內部碼） |
 | 異常 | `tw-no-stock`（三家沒貨）/ `tw-below-low-sales`（湊不滿低銷）/ `tw-data-gap`（已分配但**缺單價→$0** 或**盒裝查不到每箱數量**）→ 寫 `anomalies.jsonl`，02 異常 tab 可篩 |
 

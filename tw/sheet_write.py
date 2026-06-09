@@ -43,9 +43,47 @@ def find_latest_week(header):
     return {"date": latest_date, "cols": cols}
 
 
+# 各廠商欄位「標題列」底色(讀自既有 5/25 欄組);資料列維持白底。需求量(紫)為既有欄不動。
+VENDOR_BG = {
+    "IL": {"red": 182 / 255.0, "green": 215 / 255.0, "blue": 168 / 255.0},  # #B6D7A8 綠
+    "HS": {"red": 234 / 255.0, "green": 153 / 255.0, "blue": 153 / 255.0},  # #EA9999 紅
+    "IN": {"red": 164 / 255.0, "green": 194 / 255.0, "blue": 244 / 255.0},  # #A4C2F4 藍
+}
+_WHITE = {"red": 1, "green": 1, "blue": 1}
+
+
+def _a1col(n):
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _color_group(ws, cols):
+    """新欄組廠商欄上色:標題=廠商色、資料列=白(覆蓋插欄從需求量繼承來的紫)。"""
+    nrows = ws.row_count or 1000
+    fmts = []
+    for v in VENDORS:
+        for kind in ("有庫存", "採購量"):
+            ci = cols.get((v, kind))
+            if ci is None:
+                continue
+            col = _a1col(ci + 1)
+            fmts.append({"range": "%s1" % col, "format": {"backgroundColor": VENDOR_BG[v]}})
+            fmts.append({"range": "%s2:%s%d" % (col, col, nrows), "format": {"backgroundColor": _WHITE}})
+    if not fmts:
+        return
+    try:
+        ws.batch_format(fmts)
+    except Exception:                # 舊版 gspread 無 batch_format → 逐一
+        for f in fmts:
+            ws.format(f["range"], f["format"])
+
+
 def ensure_today_group(ws, today):
-    """確保有一組『日期=today』的欄(IL/HS/IN × 有庫存/採購量 + 建單日期)在『需求量』左邊。
-    『需求量』(紫)為單一最右欄,順便把它的日期改成 today。
+    """確保有一組『日期=today』的欄(IL/HS/IN × 有庫存/採購量)在『需求量』左邊。
+    『需求量』(紫)為單一最右欄,順便把它的日期改成 today。新建時依廠商上色。
     同一天已建 → 不重複插入(冪等)。回 find_latest_week(更新後) 結果;sheet 無『需求量』欄回 None。"""
     header = ws.row_values(1)
     demand_idx = None
@@ -60,11 +98,10 @@ def ensure_today_group(ws, today):
         for h in header if str(h).strip()
     )
     if not has_today:
-        new_cols = []                            # 順序同既有欄組:IL/HS/IN × 有庫存/採購量,末尾建單日期
+        new_cols = []                            # 順序同既有欄組:IL/HS/IN × 有庫存/採購量(不含建單日期)
         for v in VENDORS:
             new_cols.append([u"%s\n%s\n有庫存" % (today, v)])
             new_cols.append([u"%s\n%s\n採購量" % (today, v)])
-        new_cols.append([u"%s\n建單日期" % today])
         ws.insert_cols(new_cols, col=demand_idx + 1, value_input_option="USER_ENTERED")
         header = ws.row_values(1)                # 插欄後右移,重抓需求量位置
         demand_idx = None
@@ -80,6 +117,8 @@ def ensure_today_group(ws, today):
     res = find_latest_week(header)
     if res is not None:
         res["createdToday"] = not has_today
+        if not has_today:
+            _color_group(ws, res["cols"])        # 只在新建時上色
     return res
 
 
