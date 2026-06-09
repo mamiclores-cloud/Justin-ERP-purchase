@@ -961,7 +961,7 @@
       html += `<div class="tw-stat"><span class="tw-stat__v">${n}</span><span class="tw-stat__k">${v} 採購單 ${tag}</span><small>金額 ${total} / 低銷 ${low}</small></div>`;
     });
     html += '</div>';
-    if (res.writeback) html += `<p class="tw-result__cols">② 回填 sheet:${res.writeback.written_cells || 0} 格(需求量 / 採購量)</p>`;
+    if (res.writeback) html += `<p class="tw-result__cols">② 回填 sheet:${res.writeback.written_cells || 0} 格(需求量 / 採購量 / 建單日期 ${escapeHtml(res.writeback.buildDate || '')})${res.writeback.buildDateColCreated ? ' · 已自動新增「建單日期」欄' : ''}</p>`;
     if (res.unshippable && res.unshippable.length) {
       const noStock = res.unshippable.filter(u => u.reason === 'no-stock').length;
       const below = res.unshippable.filter(u => u.reason === 'below-low-sales').length;

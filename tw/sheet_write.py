@@ -28,6 +28,8 @@ def find_latest_week(header):
             kind = "採購量"
         elif "需求量" in n:
             kind = "需求量"
+        elif "建單日期" in n:
+            kind = "建單日期"
         else:
             continue
         vendor = next((v for v in VENDORS if v in n), None)
@@ -41,11 +43,12 @@ def find_latest_week(header):
     return {"date": latest_date, "cols": cols}
 
 
-def apply_cells(ws, triples):
-    """triples: [(row1based, col1based, value)] → 一次 batch 寫入。回寫入格數。"""
+def apply_cells(ws, triples, value_input_option="USER_ENTERED"):
+    """triples: [(row1based, col1based, value)] → 一次 batch 寫入。回寫入格數。
+    value_input_option:數字用 USER_ENTERED;建單日期等文字用 RAW(避免被當日期重新解析)。"""
     if not triples:
         return 0
     import gspread
     cells = [gspread.cell.Cell(row=r, col=c, value=v) for (r, c, v) in triples]
-    ws.update_cells(cells, value_input_option="USER_ENTERED")
+    ws.update_cells(cells, value_input_option=value_input_option)
     return len(cells)

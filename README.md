@@ -348,7 +348,7 @@ flowchart TD
     Demand --> Join[以 MainId #N join sheet]
     Join --> Alloc[分配演算法<br/>6倍數/補最低量 · BOX分廠訂整箱<br/>低銷 IL8000 HS3000 IN5000<br/>需求全訂 · 湊不滿改別家 · 平手挑便宜]
     Alloc --> PO[一廠商一張採購單<br/>TW-廠商 訂單號=日期<br/>POST add]
-    PO --> Back[回填 採購量 / 需求量 到 sheet]
+    PO --> Back[回填 採購量 / 需求量 / 建單日期 到 sheet]
     Back --> Anom[異常紀錄<br/>訂不到:三家沒貨/湊不滿低銷<br/>+資料缺漏:缺單價/盒裝缺箱]
     Anom --> End([完成])
 
@@ -366,6 +366,7 @@ flowchart TD
 | 低銷門檻 | IL 8000 / HS 3000 / IN 5000；廠商被分到的總金額 ≥ 低銷才出貨 |
 | 分配目標 | 需求全訂（低銷只是出貨門檻）；多家有貨 → 分給最需湊低銷者，**平手挑每個單價最便宜**（缺價排最後）；某家湊不滿 → 改分給別家有貨；都沒人接 → 記異常 |
 | 建單 | 一廠商一張單（`TW-IL`/`TW-HS`/`TW-IN`），`PurchasePlatform=TW-廠商`、`PurchasePlatformNo=日期 MMDD` |
+| 回填 sheet | execute 把 需求量 + 各家採購量 寫回最右既有欄組；並自動於「需求量」**左側新增「建單日期」欄**（沒有才加，冪等），記錄**實際執行當天**日期（文字）。有庫存欄由 Phase A 打 `v` |
 | 比對 key | IL/HS = 廠商料號（後綴變體、`I↔1` OCR 容錯）；IN = barcode（濾掉 `000000…` 補零內部碼） |
 | 異常 | `tw-no-stock`（三家沒貨）/ `tw-below-low-sales`（湊不滿低銷）/ `tw-data-gap`（已分配但**缺單價→$0** 或**盒裝查不到每箱數量**）→ 寫 `anomalies.jsonl`，02 異常 tab 可篩 |
 
