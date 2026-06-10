@@ -11,7 +11,7 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import match as M
-from sheet_write import find_latest_week, apply_cells
+from sheet_write import find_latest_week, apply_cells, clear_data
 
 VENDORS = ("IL", "HS", "IN")
 
@@ -33,6 +33,8 @@ def main():
 
     # 欄組由 Phase A 的 ensure_today_group 建立;這裡只寫值,不插欄。
     cols = week["cols"]
+    # 先清掉需求量 + 本組採購量的舊值(避免上次跑剩的殘留 → 假象「有需求量卻沒採購量」)
+    clear_data(ws, [cols.get((None, "需求量"))] + [cols.get((v, "採購量")) for v in VENDORS])
 
     # product code → sheet 列號(1-based)
     colA = ws.col_values(1)

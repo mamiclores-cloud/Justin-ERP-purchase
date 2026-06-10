@@ -121,6 +121,7 @@ def main():
     written = 0
     missing_cols = [v for v in VENDORS if week["cols"].get((v, "有庫存")) is None]
     if args.execute:
+        W.clear_data(ws, [week["cols"].get((v, "有庫存")) for v in VENDORS])  # 先清舊 v(避免殘留)
         triples = []
         for v in VENDORS:
             ci = week["cols"].get((v, "有庫存"))

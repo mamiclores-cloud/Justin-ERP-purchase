@@ -122,9 +122,23 @@ def ensure_today_group(ws, today):
     return res
 
 
+def clear_data(ws, col0_list):
+    """清掉指定欄(0-based)的資料列(第 2 列起)值,保留標題與格式。
+    避免上次跑剩的舊值殘留(ERP 需求/有貨會隨時間變,沒清會出現「有需求量卻沒採購量」的假象)。"""
+    nrows = ws.row_count or 1000
+    ranges = []
+    for c in col0_list:
+        if c is None:
+            continue
+        a = _a1col(c + 1)
+        ranges.append("%s2:%s%d" % (a, a, nrows))
+    if ranges:
+        ws.batch_clear(ranges)
+
+
 def apply_cells(ws, triples, value_input_option="USER_ENTERED"):
     """triples: [(row1based, col1based, value)] → 一次 batch 寫入。回寫入格數。
-    value_input_option:數字用 USER_ENTERED;建單日期等文字用 RAW(避免被當日期重新解析)。"""
+    value_input_option:數字用 USER_ENTERED;文字用 RAW(避免被當日期重新解析)。"""
     if not triples:
         return 0
     import gspread
