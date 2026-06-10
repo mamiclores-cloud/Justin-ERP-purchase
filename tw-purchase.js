@@ -128,9 +128,13 @@ function buildErpLookup(list, opts) {
 function lookupDemand(erp, productCode) {
   const k = norm(productCode);
   if (erp.byKey.has(k)) return erp.byKey.get(k);
-  const main = mainOf(productCode);
-  const list = erp.byMain.get(main);
-  if (list && list.length === 1) return list[0];   // 整品(無 #)單一規格 fallback
+  // byMain 單一規格 fallback 只能用在「整品(無 #N 規格後綴)」的列。
+  // 指定規格(如 KFD35 #1)若沒精準對到 byKey,就不接 → 絕不錯接到別的規格,
+  // 否則一個 MainId 只有一個規格有需求時,該品所有規格列都會被錯接成同一規格(全變 #4 的 bug)。
+  if (!String(productCode).includes('#')) {
+    const list = erp.byMain.get(mainOf(productCode));
+    if (list && list.length === 1) return list[0];
+  }
   return null;
 }
 
