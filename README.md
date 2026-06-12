@@ -9,7 +9,7 @@
 | Workflow | 搜尋方式 | 門檻 | 標籤排除 | 特殊 |
 |---|---|---|---|---|
 | **Indo** | `Keyword='Indo'` | 規格加總 ≥ 6 | `special` 標籤 / 貨號開頭 `KDS`（全域） | — |
-| **1688** | `keywordType='ALL'` 廣泛 | 規格加總 ≥ 3 | `special` 標籤 / 貨號開頭 `KDS`（全域）＋ `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單 |
+| **1688** | `keywordType='ALL'` 廣泛 | 規格加總 ≥ 3 | `special` 標籤 / 貨號開頭 `KDS`（全域）＋ `Indo`/`TW`/`YLL`/`Thai`/`SKSP*` | **Phase 2 SKSP 共同採購**：同 `SKSP###` 代碼合單；**6天內不重複採購**：同商品在「採購中」6 天內已建單 → 跳過（`--recent-days`，0=關閉） |
 | **TW** | `Keyword='TW'` | 廠商低銷金額（IL 8000 / HS 3000 / IN 5000） | 同全域 | **多廠商庫存比對 + 跨廠商分配**：上傳三廠商庫存表 → 比對打勾 → 依低銷分配 → **一廠商一張採購單**；解析快取（庫存沒更新免重傳）。詳見下方 [TW 採購](#tw-採購第三-workflow跨廠商分配) |
 
 > 全域不訂購（兩個 workflow 都跳過，語意同 STOP）：
@@ -24,6 +24,7 @@
 - 3️⃣ 不訂購原則（**STOP 規格跳過** + **special/KDS 全域標籤排除** + **1688 標籤排除**）
 - 4️⃣ 共同採購（**1688 only**：SKSP 同代碼合單）
 - 5️⃣ 異常回報（數量不足 / STOP 故沒訂購）
+- 6️⃣ 6天內不重複採購（**1688 only**，逐字稿 2026/06/12）：建單前查「採購單 > 採購中」，同商品 6 天內已建過單 → 直接跳過（不算異常）
 
 ---
 
@@ -216,23 +217,26 @@ flowchart TD
 
 ## 1688 兩階段工作流程
 
-1688 一鍵採購會 **一個 child process 跑完兩個階段**：
+1688 一鍵採購會 **一個 child process 跑完兩個階段**（前面多一個 Phase 0 查重複採購）：
 
 ```mermaid
 flowchart TD
-    Start([1688 一鍵採購<br/>workflow=1688]) --> P1Search[Phase 1 廣泛搜尋<br/>keywordType=ALL  keyword=空]
+    Start([1688 一鍵採購<br/>workflow=1688]) --> P0[Phase 0 查採購中清單<br/>PurchaseSheet/list finish=false<br/>單號前8碼=建單日期 → 6天內商品 Map]
+    P0 --> P1Search[Phase 1 廣泛搜尋<br/>keywordType=ALL  keyword=空]
     P1Search --> P1Loop{遍歷候選商品}
     P1Loop --> P1Tag{含 Indo/TW/YLL/Thai/SKSP*?}
     P1Tag -->|是| P1Skip[SKIP-TAG<br/>留給 Phase 2 處理<br/>不算異常]
-    P1Tag -->|否| P1Rules[套商業規則<br/>STOP / NX / 加總≥3]
+    P1Tag -->|否| P1Rules[套商業規則<br/>STOP / NX / 加總≥3<br/>＋6天內已採購→SKIP-RECENT]
     P1Rules --> P1Decide{decision?}
     P1Decide -->|create| P1Post[POST add<br/>個別採購單]
+    P1Decide -->|skip-recent-purchase| P1Recent[6天內已建單<br/>跳過 不算異常]
     P1Decide -->|skip-insufficient| P1Anom[記異常<br/>insufficient-quantity]
     P1Skip --> P1Loop
     P1Post --> P1Loop
+    P1Recent --> P1Loop
     P1Anom --> P1Loop
     P1Loop -->|完| P2Search[Phase 2 SKSP 搜尋<br/>keyword=SKSP]
-    P2Search --> P2Decide[每商品 decideProduct<br/>threshold=0]
+    P2Search --> P2Decide[每商品 decideProduct<br/>threshold=0<br/>6天內已採購的商品不進合單]
     P2Decide --> P2Group[依 SKSP### 代碼分組]
     P2Group --> P2Loop{遍歷每組}
     P2Loop --> P2Sum{群組合計 rawSum ≥ 3?}
@@ -262,6 +266,18 @@ flowchart TD
 | 門檻 | 個別商品 `rawSum ≥ 3` | 個別商品 threshold=0；**群組合計 `≥ 3`** 才建單 |
 | 採購單粒度 | 一商品一張單 | 同 `SKSP###` 代碼的多商品 → **合成一張單** |
 | 異常記錄 | `insufficient-quantity` per-product | `insufficient-quantity` per-group（mainId=SKSP###）|
+| 6天內不重複採購 | 商品達標但 6 天內已建單 → `skip-recent-purchase` 跳過 | 同左；該商品不進合單，群組合計以剩餘商品計 |
+
+### 6天內不重複採購（追加規則，逐字稿 2026/06/12）
+
+建單前（Phase 0）先打 `GET /api/PurchaseSheet/list?finish=false` 抓「採購作業 > 採購單 > **採購中**」全部單據，**採購單號前 8 碼 = 建單日期**（`yyyyMMdd`），整理出「6 天內（含今天）出現過的商品 MainId」清單：
+
+- 商品達到數量標準、但清單中有它 → **不建單，直接跳過**（例：6/12 建單時，商品在 6/6~6/11 有過採購單 → 不訂購）
+- 清單中沒有 → 正常建單
+- 屬**預期行為**（同標籤排除），不寫入員工異常紀錄檔（`anomalies.jsonl`），但 console 總結會列出「6天內已採購故跳過」明細供核對
+- 只查「採購中」（`finish=false`），已採購完成的單不擋 —— 與員工手動操作流程一致
+- `--recent-days N` 可調天數（預設 6，`0` = 關閉檢查；前端可傳 `recentDays`）
+- 只在 **1688 workflow** 生效；Indo / TW 不變
 
 ### 為什麼要兩階段
 

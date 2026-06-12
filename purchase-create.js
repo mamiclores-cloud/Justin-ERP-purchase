@@ -7,6 +7,7 @@
 //      - STOP 規格從 Remark 拿來跳過
 //      - 加總 needpurchaseQty (原值) >= 6 才建單；< 6 → 數量不足異常
 //      - NX 倍數規則只在通過後對個別規格放大
+//      - (1688) 6天內不重複採購：先查「採購單 > 採購中」，同商品 6 天內已建單 → 跳過
 //   3. dry-run → 印計畫；execute → 對每張 create-decision POST /api/PurchaseSheet/add
 //   4. 結尾印異常清單 + 統計
 //
@@ -17,6 +18,7 @@
 //   node purchase-create.js ... --only KBT580,KBT89                         # 只跑指定商品
 //   node purchase-create.js ... --keyword-type ProductCode                  # 主貨號搜尋
 //   node purchase-create.js ... --threshold 6                               # 加總門檻
+//   node purchase-create.js ... --recent-days 6                             # 1688 N天內不重複採購（0=關閉）
 //   node purchase-create.js ... --max-products 5                            # 最多處理 N 筆（測試用）
 //   node purchase-create.js ... --headed                                    # debug 顯示瀏覽器
 
@@ -113,6 +115,10 @@ function parseArgs() {
     // 行為控制
     only:        get('--only'),                           // 逗號分隔 MainId 清單
     threshold:   parseInt(get('--threshold', '6'), 10) || 6,
+    recentDays:  (() => {                                  // 1688 6天內不重複採購；0 = 關閉
+      const v = parseInt(get('--recent-days', '6'), 10);
+      return Number.isNaN(v) || v < 0 ? 6 : v;
+    })(),
     maxProducts: parseInt(get('--max-products', '0'), 10) || 0,  // 0 = 無上限
     pauseMs:     parseInt(get('--pause-ms', '500'), 10) || 0,    // POST 之間的 delay
   };
@@ -134,6 +140,9 @@ function printHeader(opts) {
   log(`  採購單:`);
   log(`    platform:    ${opts.platform || '(空)'}`);
   log(`    threshold:   加總 >= ${effectiveThreshold} 才建單`);
+  if (opts.workflow === '1688') {
+    log(`    recentDays:  ${opts.recentDays > 0 ? opts.recentDays + ' 天內已建過採購單(採購中)的商品不重複建單' : '0 (不檢查重複採購)'}`);
+  }
   if (opts.only)        log(`    only:        ${opts.only}`);
   if (opts.maxProducts) log(`    maxProducts: ${opts.maxProducts}`);
   log('');
@@ -146,6 +155,7 @@ function formatDecision(d) {
     'skip-insufficient':     '[SKIP-INSUFFICIENT]',
     'skip-no-needpurchase':  '[SKIP-NO-NEED]',
     'skip-tag-excluded':     '[SKIP-TAG]',
+    'skip-recent-purchase':  '[SKIP-RECENT]',
   }[d.decision] || '[UNKNOWN]';
 
   lines.push(`${decisionLabel}  ${d.mainId}  ${d.productName ? '— ' + d.productName.slice(0, 50) : ''}` +
@@ -171,6 +181,8 @@ function formatDecision(d) {
     d.anomalies[0]?.specs?.forEach((s) => {
       lines.push(`      • ${s.label}  origQty=${s.qty}`);
     });
+  } else if (d.decision === 'skip-recent-purchase') {
+    lines.push(`    rawSum=${d.rawSum} 達標，但 ${d.recentPurchase.dateStr} 已建過採購單 ${d.recentPurchase.purchaseNo}（採購中）← 6天內不重複採購，跳過`);
   }
   return lines.join('\n');
 }
@@ -261,15 +273,26 @@ function printSummary(decisions, results, opts) {
     'skip-insufficient':  decisions.filter((d) => d.decision === 'skip-insufficient').length,
     'skip-no-needpurchase': decisions.filter((d) => d.decision === 'skip-no-needpurchase').length,
     'skip-tag-excluded':  decisions.filter((d) => d.decision === 'skip-tag-excluded').length,
+    'skip-recent-purchase': decisions.filter((d) => d.decision === 'skip-recent-purchase').length,
   };
   log(`  CREATE decisions:     ${byDecision['create']}`);
   log(`  SKIP (數量不足):       ${byDecision['skip-insufficient']}`);
   log(`  SKIP (無建議量):       ${byDecision['skip-no-needpurchase']}`);
   if (byDecision['skip-tag-excluded']) log(`  SKIP (標籤排除):       ${byDecision['skip-tag-excluded']}`);
+  if (byDecision['skip-recent-purchase']) log(`  SKIP (6天內已採購):    ${byDecision['skip-recent-purchase']}`);
 
   if (opts.execute && results) {
     log(`  POST 成功:            ${results.filter((r) => r.status === 'ok').length}`);
     log(`  POST 失敗:            ${results.filter((r) => r.status === 'fail' || r.status === 'error').length}`);
+  }
+
+  // 6天內不重複採購：屬預期行為（同標籤排除），不寫異常紀錄檔，但在總結列出讓員工核對
+  const recentSkipped = decisions.filter((d) => d.decision === 'skip-recent-purchase');
+  if (recentSkipped.length > 0) {
+    log(`\n=== 6天內已採購故跳過 (${recentSkipped.length}) ===`);
+    recentSkipped.forEach((d) => {
+      log(`  - ${d.mainId}  需求 ${d.rawSum} 達標，但 ${d.recentPurchase.dateStr} 已建單 ${d.recentPurchase.purchaseNo}（採購中）`);
+    });
   }
 
   const anomalies = decisions.flatMap((d) => d.anomalies).filter((a) => a.type !== 'tag-excluded');
@@ -320,6 +343,49 @@ async function runIndo(opts, api) {
   printSummary(decisions, results, opts);
 }
 
+/* ============ 1688：6天內不重複採購（逐字稿 2026/06/12） ============
+   建單前先查「採購作業 > 採購單 > 採購中」（finish=false），
+   採購單號前 8 碼 = 建單日期 yyyyMMdd。
+   同商品（MainId）在 days 天內（含今天）已有採購單 → 該商品不建單。
+   例：6/12 建單，商品在 6/6~6/11 有過採購單 → 跳過。
+   回傳 Map(MainId → { purchaseNo, dateStr })，只留每商品「最近」一筆。 */
+async function fetchRecentPurchaseMap(api, days) {
+  const map = new Map();
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - days);
+
+  const PAGE = 500;
+  let start = 0;
+  let scanned = 0;
+  let totalSheets = Infinity;
+  while (scanned < totalSheets) {
+    const res = await api.Purchase.list({ finish: false, start, length: PAGE });
+    const sheets = res.list || [];
+    totalSheets = res.recordsFiltered ?? res.recordsTotal ?? sheets.length;
+    if (sheets.length === 0) break;
+    scanned += sheets.length;
+    start += sheets.length;
+
+    for (const s of sheets) {
+      const no = String(s.PurchaseNo || '');
+      const m = no.match(/^(\d{4})(\d{2})(\d{2})/);
+      if (!m) continue;  // 單號格式異常 → 視為非近期單，不擋
+      const d = new Date(+m[1], +m[2] - 1, +m[3]);
+      if (d < cutoff) continue;
+      const dateStr = `${m[1]}/${m[2]}/${m[3]}`;
+      for (const it of s.itemView || []) {
+        const mid = it.productMainId;
+        if (!mid) continue;
+        const prev = map.get(mid);
+        if (!prev || d > prev.date) map.set(mid, { purchaseNo: no, date: d, dateStr });
+      }
+    }
+  }
+  log(`  採購中共 ${scanned} 張單，其中 ${days} 天內建立、含 ${map.size} 個商品（這些商品本輪不建單）`);
+  return map;
+}
+
 /* ============ 1688 工作流程：兩階段 ============ */
 
 // Phase 1 不訂購標籤清單（SKSP 也跳過，留給 phase 2 共同採購）
@@ -333,6 +399,15 @@ async function run1688(opts, api) {
   const allDecisions = [];
   let totalResults = [];
 
+  /* ── Phase 0：6天內不重複採購 — 查「採購中」清單 ── */
+  let recentMap = new Map();
+  if (opts.recentDays > 0) {
+    log(`\n=== [1688 Phase 0] 查採購中清單（${opts.recentDays} 天內不重複採購）===`);
+    recentMap = await fetchRecentPurchaseMap(api, opts.recentDays);
+  } else {
+    log(`\n[1688] --recent-days 0 → 跳過重複採購檢查`);
+  }
+
   /* ── Phase 1：廣泛搜尋（一般 1688 商品） ── */
   log(`\n${'='.repeat(60)}`);
   log(`=== [1688 Phase 1] 廣泛搜尋一般商品 (threshold ≥ ${THRESHOLD_1688}) ===`);
@@ -341,7 +416,7 @@ async function run1688(opts, api) {
   const p1decisions = await fetchAndDecide(
     api,
     { keywordType: 'ALL', keyword: '' },
-    { threshold: THRESHOLD_1688, excludeTags: EXCLUDE_1688 },
+    { threshold: THRESHOLD_1688, excludeTags: EXCLUDE_1688, recentPurchases: recentMap },
     opts,
   );
   allDecisions.push(...p1decisions);
@@ -409,12 +484,13 @@ async function run1688(opts, api) {
     const d = decideProduct(p.product, p.productSpc, {
       threshold: 0,
       excludeTags: EXCLUDE_SKSP,
+      recentPurchases: recentMap,   // 6天內已建單的 SKSP 商品也不重複採購（不進合單）
     });
     skspDecisions.push(d);
     // --only 模式:只印 / 只計相關 SKSP 群組的商品(避免雜訊)
     const skspCode = getSkspCode(d.tags);
     const relevant = !onlySkspCodes || (skspCode && onlySkspCodes.has(skspCode));
-    if (relevant && (d.decision === 'create' || d.decision === 'skip-no-needpurchase')) {
+    if (relevant && (d.decision === 'create' || d.decision === 'skip-no-needpurchase' || d.decision === 'skip-recent-purchase')) {
       console.log(formatDecision(d));
       console.log('');
     }
