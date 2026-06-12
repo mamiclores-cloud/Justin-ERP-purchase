@@ -151,9 +151,7 @@ function buildArgs(stepKey, params) {
   if (params.threshold !== undefined && params.threshold !== null && params.threshold !== '') {
     args.push('--threshold', String(params.threshold));
   }
-  if (params.recentDays !== undefined && params.recentDays !== null && params.recentDays !== '') {
-    args.push('--recent-days', String(params.recentDays));  // 1688 6天內不重複採購（0=關閉）
-  }
+  // 1688「6天內不重複採購」固定 6 天,不開放前端調整(CLI --recent-days 僅開發測試用)
   if (params.only)        args.push('--only', String(params.only));
   if (params.maxProducts) args.push('--max-products', String(params.maxProducts));
   if (params.pauseMs !== undefined && params.pauseMs !== null && params.pauseMs !== '') {

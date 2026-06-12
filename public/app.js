@@ -372,7 +372,8 @@
     const msg =
       '即將在 ERP 實際建立 1688 的採購單（含 SKSP 共同採購）。\n\n' +
       `算式: ${params.cardinality} × ${params.percent}%\n` +
-      `平台: ${params.platform}\n\n` +
+      `平台: ${params.platform}\n` +
+      '內建規則: 同商品 6 天內已建單(採購中)自動跳過\n\n' +
       '確定要執行嗎?';
     if (!confirm(msg)) return;
     startJob(params);
@@ -735,7 +736,7 @@
         </div>
       </header>
       <div class="grid grid--2" style="font-size:13px;color:var(--c-text-sub);">
-        <div><b>採購條件</b><br><code style="font-family:var(--font-mono);background:var(--c-bg-soft);padding:1px 6px;border-radius:4px;">${escapeHtml(opts.cardinality || '')} × ${escapeHtml(String(opts.percent || ''))}%${platKind === 'tw' ? ' · TW(最近上傳的庫存)' : ' · 平台 "' + escapeHtml(opts.platform || '') + '"'}</code></div>
+        <div><b>採購條件</b><br><code style="font-family:var(--font-mono);background:var(--c-bg-soft);padding:1px 6px;border-radius:4px;">${escapeHtml(opts.cardinality || '')} × ${escapeHtml(String(opts.percent || ''))}%${platKind === 'tw' ? ' · TW(最近上傳的庫存)' : ' · 平台 "' + escapeHtml(opts.platform || '') + '"'}${opts.workflow === '1688' ? ' · 6天內不重複採購' : ''}</code></div>
         <div><b>下次執行</b><br>${s.nextRun ? fmtAbsTime(s.nextRun) + ' (' + fmtRel(s.nextRun) + ')' : '—'}</div>
         <div><b>上次執行</b><br>${escapeHtml(lastRunText)}</div>
       </div>
